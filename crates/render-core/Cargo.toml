@@ -1,0 +1,9 @@
+[package]
+name = "render-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+render-ir.workspace = true
+base64 = "0.22"
+percent-encoding = "2"
