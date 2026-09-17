@@ -8,10 +8,12 @@
 //! px de dispositivo e px CSS coincidem e a extração pode misturar as duas
 //! fontes de coordenada sem conversão. Mudar a escala exige revisar isto.
 
+use crate::net::{ColetorDeRecursos, ProvedorDataUri};
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
-use render_ir::{BoxItem, DisplayList, FontResource, Glyph, Rect, TextRun};
+use render_ir::{BoxItem, DisplayList, FontResource, Glyph, ImageItem, Rect, TextRun};
+use std::sync::Arc;
 use style::properties::ComputedValues;
 
 /// Altura inicial do viewport de layout. O documento é contínuo: a altura real
@@ -54,7 +56,16 @@ fn layout_e_extrai(
     largura_viewport: u32,
     altura_viewport: u32,
 ) -> (DisplayList, f32) {
-    let mut doc = HtmlDocument::from_html(html, DocumentConfig::default());
+    // O provedor resolve `data:` de forma síncrona e recusa qualquer outro
+    // esquema; o coletor guarda o que foi resolvido para aplicarmos abaixo.
+    let coletor = Arc::new(ColetorDeRecursos::default());
+    let mut doc = HtmlDocument::from_html(
+        html,
+        DocumentConfig {
+            net_provider: Some(Arc::new(ProvedorDataUri::new(coletor.clone()))),
+            ..Default::default()
+        },
+    );
     doc.set_viewport(Viewport::new(
         largura_viewport,
         altura_viewport,
@@ -62,6 +73,17 @@ fn layout_e_extrai(
         ColorScheme::Light,
     ));
     doc.resolve(0.0);
+
+    // As imagens só existem depois que o recurso entra no documento, e isso
+    // invalida o layout — daí o segundo resolve.
+    let recursos = coletor.drenar();
+    let havia_recursos = !recursos.is_empty();
+    for recurso in recursos {
+        doc.load_resource(recurso);
+    }
+    if havia_recursos {
+        doc.resolve(0.0);
+    }
 
     let mut dl = DisplayList {
         width: width_px,
@@ -102,6 +124,20 @@ fn layout_e_extrai(
                     border_width: borda_largura,
                 });
             }
+        }
+
+        if let Some(raster) = el.raster_image_data() {
+            dl.images.push(ImageItem {
+                rect: Rect {
+                    x,
+                    y,
+                    width: layout.size.width,
+                    height: layout.size.height,
+                },
+                width_px: raster.width,
+                height_px: raster.height,
+                rgba: raster.data.clone(),
+            });
         }
 
         let Some(text_layout) = el.inline_layout_data.as_ref() else {
@@ -412,5 +448,37 @@ mod tests {
             verde.rect.y
         );
         assert!(dl.content_height() > 20_000.0);
+    }
+    /// PNG 4x2 vermelho, embutido para o teste não depender de fixture binária.
+    const PNG_4X2: &str = "iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAIAAADwyuo0AAAAEElEQVR4nGM4IScHRwzIHABvCgghBqXSdgAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn imagem_data_uri_vira_item_da_display_list() {
+        let html = format!(
+            r#"<img style="width:80px;height:40px" src="data:image/png;base64,{PNG_4X2}" />"#
+        );
+        let dl = render_html(&html, 500.0);
+        assert_eq!(dl.images.len(), 1, "a imagem não chegou na display list");
+        let img = &dl.images[0];
+        assert_eq!((img.width_px, img.height_px), (4, 2), "tamanho do bitmap");
+        assert!((img.rect.width - 80.0).abs() < 1.0, "largura da caixa: {:?}", img.rect);
+        assert!((img.rect.height - 40.0).abs() < 1.0, "altura da caixa: {:?}", img.rect);
+        assert_eq!(img.rgba.len(), 4 * 2 * 4, "RGBA8 de 4x2");
+    }
+
+    #[test]
+    fn imagem_sem_dimensao_explicita_usa_o_tamanho_intrinseco() {
+        let html = format!(r#"<img src="data:image/png;base64,{PNG_4X2}" />"#);
+        let dl = render_html(&html, 500.0);
+        let img = &dl.images[0];
+        assert!((img.rect.width - 4.0).abs() < 1.0, "largura intrínseca: {:?}", img.rect);
+        assert!((img.rect.height - 2.0).abs() < 1.0, "altura intrínseca: {:?}", img.rect);
+    }
+
+    #[test]
+    fn imagem_http_e_ignorada_sem_abrir_socket() {
+        // Invariante de segurança: só data: é resolvido.
+        let dl = render_html(r#"<img src="https://exemplo.invalido/logo.png" />"#, 500.0);
+        assert!(dl.images.is_empty(), "esquema não-data: não pode virar imagem");
     }
 }

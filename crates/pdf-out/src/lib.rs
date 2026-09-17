@@ -4,6 +4,11 @@
 use paginate::{Page, PageGeometry};
 use printpdf::*;
 use render_ir::FontResource;
+use std::collections::HashMap;
+
+/// Identidade de um bitmap já embutido: dimensões mais o endereço do buffer
+/// compartilhado, que é o que o `Arc` da display list preserva entre páginas.
+type ChaveImagem = (u32, u32, usize);
 
 /// PDF trabalha em pt; o resto do motor em px a 96dpi.
 fn pt(px: f32) -> f32 {
@@ -23,6 +28,10 @@ pub fn render_pdf(pages: &[Page], fonts: &[FontResource], geo: &PageGeometry) ->
                 .map(|parsed| doc.add_font(&parsed))
         })
         .collect();
+
+    // Um XObject por imagem distinta; páginas repetem o mesmo id (uma logo de
+    // header não é reembutida por página).
+    let mut cache_imagens: HashMap<ChaveImagem, XObjectId> = HashMap::new();
 
     let largura_pt = pt(geo.sheet_width);
     let altura_pt = pt(geo.sheet_height);
@@ -44,6 +53,41 @@ pub fn render_pdf(pages: &[Page], fonts: &[FontResource], geo: &PageGeometry) ->
                         ops.push(retangulo(b.rect, altura_pt, PaintMode::Stroke));
                     }
                 }
+            }
+
+            for img in &page.images {
+                if img.width_px == 0 || img.height_px == 0 || img.rgba.is_empty() {
+                    continue;
+                }
+                let chave = (
+                    img.width_px,
+                    img.height_px,
+                    std::sync::Arc::as_ptr(&img.rgba) as usize,
+                );
+                let id = cache_imagens.entry(chave).or_insert_with(|| {
+                    doc.add_image(&RawImage {
+                        pixels: RawImageData::U8(img.rgba.as_ref().clone()),
+                        width: img.width_px as usize,
+                        height: img.height_px as usize,
+                        data_format: RawImageFormat::RGBA8,
+                        tag: Vec::new(),
+                    })
+                });
+
+                // Com dpi = 72, o auto-escalonamento do UseXobject leva o bitmap
+                // a 1px = 1pt; scale_x/y ajustam daí para a caixa do layout.
+                ops.push(Op::UseXobject {
+                    id: id.clone(),
+                    transform: XObjectTransform {
+                        translate_x: Some(Pt(pt(img.rect.x))),
+                        translate_y: Some(Pt(altura_pt - pt(img.rect.y) - pt(img.rect.height))),
+                        scale_x: Some(pt(img.rect.width) / img.width_px as f32),
+                        scale_y: Some(pt(img.rect.height) / img.height_px as f32),
+                        rotate: None,
+                        dpi: Some(72.0),
+                        no_auto_scale: false,
+                    },
+                });
             }
 
             for run in &page.texts {
@@ -165,6 +209,7 @@ mod tests {
     fn texto_e_emitido_como_operador_de_texto_nao_como_imagem() {
         let page = Page {
             boxes: vec![],
+            images: vec![],
             texts: vec![TextRun {
                 origin_x: 100.0,
                 baseline_y: 200.0,
@@ -202,5 +247,40 @@ mod tests {
         }
         panic!("nenhuma fonte de teste encontrada nos caminhos conhecidos");
     }
-}
+    #[test]
+    fn imagem_vira_xobject_embutido_no_pdf() {
+        let page = Page {
+            boxes: vec![],
+            texts: vec![],
+            images: vec![render_ir::ImageItem {
+                rect: render_ir::Rect { x: 50.0, y: 20.0, width: 80.0, height: 40.0 },
+                width_px: 4,
+                height_px: 2,
+                // 4x2 RGBA opaco.
+                rgba: std::sync::Arc::new(vec![200; 4 * 2 * 4]),
+            }],
+        };
+        let bytes = render_pdf(&[page], &[], &geo());
+        let texto = String::from_utf8_lossy(&bytes);
+        assert!(texto.contains("/Subtype/Image") || texto.contains("/Subtype /Image"),
+            "a imagem não virou XObject");
+        assert!(texto.contains("/Width 4"), "largura do bitmap ausente");
+        assert!(texto.contains("/Height 2"), "altura do bitmap ausente");
+    }
 
+    #[test]
+    fn imagem_vazia_nao_derruba_a_emissao() {
+        let page = Page {
+            boxes: vec![],
+            texts: vec![],
+            images: vec![render_ir::ImageItem {
+                rect: render_ir::Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 },
+                width_px: 0,
+                height_px: 0,
+                rgba: std::sync::Arc::new(vec![]),
+            }],
+        };
+        let bytes = render_pdf(&[page], &[], &geo());
+        assert!(bytes.starts_with(b"%PDF-"));
+    }
+}

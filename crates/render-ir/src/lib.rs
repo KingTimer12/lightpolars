@@ -47,6 +47,18 @@ pub struct BoxItem {
     pub border_width: f32,
 }
 
+/// Uma imagem já decodificada, posicionada pelo layout.
+/// Guarda RGBA8 porque é o que o blitz entrega e o que o PDF consome; o Arc
+/// existe para o corte em páginas não copiar o bitmap inteiro.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageItem {
+    pub rect: Rect,
+    /// Largura e altura em pixels do bitmap, não da caixa onde ele é desenhado.
+    pub width_px: u32,
+    pub height_px: u32,
+    pub rgba: std::sync::Arc<Vec<u8>>,
+}
+
 /// Bytes de uma fonte usada pelo documento, com o índice da face no arquivo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontResource {
@@ -58,6 +70,7 @@ pub struct FontResource {
 pub struct DisplayList {
     pub boxes: Vec<BoxItem>,
     pub texts: Vec<TextRun>,
+    pub images: Vec<ImageItem>,
     pub fonts: Vec<FontResource>,
     pub width: f32,
 }
@@ -67,8 +80,10 @@ impl DisplayList {
     pub fn content_height(&self) -> f32 {
         let from_boxes = self.boxes.iter().map(|b| b.rect.bottom());
         let from_texts = self.texts.iter().map(|t| t.baseline_y);
+        let from_images = self.images.iter().map(|i| i.rect.bottom());
         from_boxes
             .chain(from_texts)
+            .chain(from_images)
             .fold(0.0_f32, |acc, v| acc.max(v))
     }
 }
@@ -115,5 +130,17 @@ mod tests {
             text: String::new(),
         });
         assert_eq!(dl.content_height(), 120.0);
+    }
+
+    #[test]
+    fn content_height_conta_a_base_das_imagens() {
+        let mut dl = DisplayList::default();
+        dl.images.push(ImageItem {
+            rect: Rect { x: 0.0, y: 10.0, width: 100.0, height: 150.0 },
+            width_px: 200,
+            height_px: 150,
+            rgba: std::sync::Arc::new(vec![0; 200 * 150 * 4]),
+        });
+        assert_eq!(dl.content_height(), 160.0);
     }
 }

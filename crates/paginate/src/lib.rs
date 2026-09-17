@@ -1,7 +1,7 @@
 //! Corte de um documento contínuo em páginas.
 //! Aritmética pura sobre retângulos: não renderiza nada e não conhece blitz.
 
-use render_ir::{BoxItem, DisplayList, FontResource, TextRun};
+use render_ir::{BoxItem, DisplayList, FontResource, ImageItem, TextRun};
 
 pub const A4_LARGURA_PX: f32 = 793.7;
 pub const A4_ALTURA_PX: f32 = 1122.5;
@@ -44,6 +44,7 @@ impl PageGeometry {
 pub struct Page {
     pub boxes: Vec<BoxItem>,
     pub texts: Vec<TextRun>,
+    pub images: Vec<ImageItem>,
 }
 
 /// Tabela de fontes única para o documento inteiro, na mesma ordem que
@@ -108,6 +109,14 @@ pub fn paginate(
                 page.texts.push(novo);
             }
         }
+        for i in &content.images {
+            if i.rect.y >= faixa.inicio && i.rect.y < faixa.fim {
+                let mut novo = i.clone();
+                novo.rect.x += geo.margins.left;
+                novo.rect.y += deslocamento;
+                page.images.push(novo);
+            }
+        }
 
         paginas.push(page);
     }
@@ -147,9 +156,14 @@ fn calcular_cortes(content: &DisplayList, altura_util: f32) -> Vec<Faixa> {
 
 fn recuar_para_limite_de_caixa(content: &DisplayList, inicio: f32, limite: f32) -> f32 {
     let mut corte = limite;
-    for b in &content.boxes {
-        let topo = b.rect.y;
-        let base = b.rect.bottom();
+    let retangulos = content
+        .boxes
+        .iter()
+        .map(|b| b.rect)
+        .chain(content.images.iter().map(|i| i.rect));
+    for r in retangulos {
+        let topo = r.y;
+        let base = r.bottom();
         // Caixa atravessa o corte: empurra a caixa inteira para a página seguinte.
         if topo > inicio && topo < corte && base > corte {
             corte = corte.min(topo);
@@ -159,6 +173,12 @@ fn recuar_para_limite_de_caixa(content: &DisplayList, inicio: f32, limite: f32) 
 }
 
 fn empilhar(page: &mut Page, fonte: &DisplayList, dx: f32, dy: f32, offset_fonte: usize) {
+    for i in &fonte.images {
+        let mut novo = i.clone();
+        novo.rect.x += dx;
+        novo.rect.y += dy;
+        page.images.push(novo);
+    }
     for b in &fonte.boxes {
         let mut novo = b.clone();
         novo.rect.x += dx;
@@ -177,7 +197,7 @@ fn empilhar(page: &mut Page, fonte: &DisplayList, dx: f32, dy: f32, offset_fonte
 #[cfg(test)]
 mod tests {
     use super::*;
-    use render_ir::{BoxItem, DisplayList, FontResource, Glyph, Rect, TextRun};
+    use render_ir::{BoxItem, DisplayList, FontResource, Glyph, ImageItem, Rect, TextRun};
 
     fn margens_zero() -> Margins {
         Margins { top: 0.0, right: 0.0, bottom: 0.0, left: 0.0 }
@@ -343,5 +363,64 @@ mod tests {
         assert_eq!(fonts[idx[0]].bytes, vec![2], "header aponta para a fonte do header");
         assert_eq!(fonts[idx[1]].bytes, vec![3], "footer aponta para a fonte do footer");
         assert_eq!(fonts[idx[2]].bytes, vec![1], "conteúdo aponta para a própria fonte");
+    }
+    fn imagem_em(y: f32, altura: f32) -> ImageItem {
+        ImageItem {
+            rect: Rect { x: 0.0, y, width: 100.0, height: altura },
+            width_px: 10,
+            height_px: 10,
+            rgba: std::sync::Arc::new(vec![0; 10 * 10 * 4]),
+        }
+    }
+
+    #[test]
+    fn imagem_vai_para_a_pagina_certa_com_as_margens_aplicadas() {
+        let geo = PageGeometry::a4(false, Margins {
+            top: 100.0, right: 0.0, bottom: 0.0, left: 50.0,
+        });
+        let h = geo.content_height();
+        let mut dl = DisplayList::default();
+        dl.images.push(imagem_em(10.0, 20.0));
+        dl.images.push(imagem_em(h + 10.0, 20.0));
+
+        let pages = paginate(&dl, None, None, &geo);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].images.len(), 1);
+        assert_eq!(pages[1].images.len(), 1);
+        assert!((pages[1].images[0].rect.y - 110.0).abs() < 0.001);
+        assert!((pages[1].images[0].rect.x - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn corte_nao_parte_uma_imagem_ao_meio() {
+        let geo = PageGeometry::a4(false, margens_zero());
+        let h = geo.content_height();
+        let mut dl = DisplayList::default();
+        dl.images.push(imagem_em(h - 20.0, 60.0));
+
+        let pages = paginate(&dl, None, None, &geo);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].images.len(), 0, "imagem cortada ao meio");
+        assert_eq!(pages[1].images.len(), 1);
+    }
+
+    #[test]
+    fn imagem_de_header_e_repetida_em_todas_as_paginas() {
+        let geo = PageGeometry::a4(false, Margins {
+            top: 100.0, right: 0.0, bottom: 0.0, left: 0.0,
+        });
+        let h = geo.content_height();
+        let mut dl = DisplayList::default();
+        dl.texts.push(texto_em(10.0));
+        dl.texts.push(texto_em(h + 10.0));
+
+        let mut header = DisplayList::default();
+        header.images.push(imagem_em(10.0, 50.0));
+
+        let pages = paginate(&dl, Some(&header), None, &geo);
+        assert_eq!(pages.len(), 2);
+        for page in &pages {
+            assert_eq!(page.images.len(), 1, "logo do header some numa das páginas");
+        }
     }
 }
