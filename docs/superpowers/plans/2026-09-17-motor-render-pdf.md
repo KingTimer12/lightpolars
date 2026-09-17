@@ -302,6 +302,15 @@ mod tests {
     fn base64_invalido_retorna_none_em_vez_de_panicar() {
         assert!(resolve_data_uri("data:image/png;base64,!!!não-é-base64!!!").is_none());
     }
+
+    #[test]
+    fn entrada_multibyte_nao_panica() {
+        // "é" ocupa os bytes 4 e 5: um corte em 5 cairia no meio do caractere.
+        assert!(resolve_data_uri("aaaaé").is_none());
+        assert!(resolve_data_uri("é").is_none());
+        assert!(resolve_data_uri("dataé").is_none());
+        assert_eq!(resolve_data_uri("data:text/plain,ação").unwrap(), "ação".as_bytes());
+    }
 }
 ```
 
@@ -363,8 +372,12 @@ pub fn resolve_data_uri(uri: &str) -> Option<Vec<u8>> {
 }
 
 fn strip_data_prefix(uri: &str) -> Option<&str> {
+    // Comparação em bytes de propósito: `uri[..5]` fatiaria `str` por limite de
+    // caractere e entraria em pânico com entrada multibyte adversária (ex.: "aaaaé",
+    // onde o byte 5 cai no meio do 'é'). `bytes[..5]` nunca panica por alinhamento,
+    // e `uri[5..]` é seguro porque um prefixo `data:` é ASCII puro.
     let bytes = uri.as_bytes();
-    if bytes.len() >= 5 && uri[..5].eq_ignore_ascii_case("data:") {
+    if bytes.len() >= 5 && bytes[..5].eq_ignore_ascii_case(b"data:") {
         Some(&uri[5..])
     } else {
         None
@@ -375,7 +388,7 @@ fn strip_data_prefix(uri: &str) -> Option<&str> {
 - [ ] **Step 4: Rodar o teste e confirmar que passa**
 
 Run: `cargo test -p render-core`
-Expected: PASS, 5 testes.
+Expected: PASS, 6 testes.
 
 - [ ] **Step 5: Commit**
 
