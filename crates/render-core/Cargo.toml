@@ -12,3 +12,4 @@ blitz-html = "0.2.0"
 blitz-traits = "0.2"
 parley = "0.6"
 style = { package = "stylo", version = "0.8" }
+slab = "0.4"
