@@ -15,6 +15,10 @@ Para preparar a suíte numa máquina nova:
    para produzir `golden/` com o Chromium atual.
 4. Suba o motor (`cargo run -p cdp-server`) e rode `node tests/aceitacao/rodar.js`.
 
+`e2e_puppeteer.js` fecha o ciclo com o Puppeteer real sem precisar de fixtures nem
+goldens — só do `puppeteer-core`, que pode vir de outro projeto via `NODE_PATH`. É
+ele que pega quebra de handshake do CDP, coisa que o smoke não exerce.
+
 `smoke.js` não precisa de nada disso: fala CDP cru pelo WebSocket nativo do Node e
 verifica que o binário responde e devolve um PDF. Use-o para separar falha de
 transporte de falha de layout.

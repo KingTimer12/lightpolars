@@ -5,6 +5,10 @@
 use base64::Engine as _;
 use paginate::paginate;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+
+/// Tamanho de cada pedaço devolvido por IO.read.
+const CHUNK: usize = 1 << 16;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Saida {
@@ -20,6 +24,10 @@ pub struct Session {
     frame_id: String,
     contador_target: u32,
     ultimo_target: Option<String>,
+    contador_contexto: i64,
+    contador_stream: u32,
+    /// PDFs entregues em transferMode ReturnAsStream, consumidos por IO.read.
+    streams: HashMap<String, (Vec<u8>, usize)>,
 }
 
 impl Session {
@@ -58,13 +66,25 @@ impl Session {
                 self.contador_target += 1;
                 let tid = format!("target-{}", self.contador_target);
                 self.ultimo_target = Some(tid.clone());
+                // O Puppeteer não chama attachToTarget: ele liga Target.setAutoAttach
+                // e espera o attachedToTarget nascer junto com o target. Sem ele,
+                // Browser.waitForTarget fica pendurado até o protocolTimeout.
                 vec![
                     self.evento_bruto(
                         &sessao,
                         "Target.targetCreated",
                         json!({ "targetInfo": Self::target_info(&tid) }),
                     ),
-                    self.ok(id, &sessao, json!({ "targetId": tid })),
+                    self.ok(id, &sessao, json!({ "targetId": &tid })),
+                    self.evento_bruto(
+                        &sessao,
+                        "Target.attachedToTarget",
+                        json!({
+                            "sessionId": SESSION_ID,
+                            "targetInfo": Self::target_info(&tid),
+                            "waitingForDebugger": false
+                        }),
+                    ),
                 ]
             }
             "Target.attachToTarget" => {
@@ -105,10 +125,96 @@ impl Session {
                 saidas.push(self.ok(id, &sessao, json!({})));
                 saidas
             }
+            "Page.getFrameTree" => vec![self.ok(
+                id,
+                &sessao,
+                json!({ "frameTree": { "frame": self.frame_info(), "childFrames": [] } }),
+            )],
+            "Page.getNavigationHistory" => vec![self.ok(
+                id,
+                &sessao,
+                json!({
+                    "currentIndex": 0,
+                    "entries": [{
+                        "id": 1,
+                        "url": "about:blank",
+                        "userTypedURL": "about:blank",
+                        "title": "",
+                        "transitionType": "typed"
+                    }]
+                }),
+            )],
+            "Target.getTargetInfo" => {
+                let tid = self.ultimo_target.clone().unwrap_or_else(|| "target-1".to_string());
+                vec![self.ok(id, &sessao, json!({ "targetInfo": Self::target_info(&tid) }))]
+            }
             "Page.printToPDF" => {
                 let bytes = self.gerar_pdf(&params);
-                let dados = base64::engine::general_purpose::STANDARD.encode(bytes);
-                vec![self.ok(id, &sessao, json!({ "data": dados }))]
+                // O Puppeteer pede ReturnAsStream e depois drena com IO.read;
+                // ele afirma `result.stream`, então devolver só `data` quebra.
+                if params.get("transferMode").and_then(Value::as_str) == Some("ReturnAsStream") {
+                    self.contador_stream += 1;
+                    let handle = format!("stream-{}", self.contador_stream);
+                    self.streams.insert(handle.clone(), (bytes, 0));
+                    vec![self.ok(id, &sessao, json!({ "stream": handle }))]
+                } else {
+                    let dados = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    vec![self.ok(id, &sessao, json!({ "data": dados }))]
+                }
+            }
+            "IO.read" => {
+                let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
+                let (dados, eof) = self.ler_stream(handle);
+                vec![self.ok(
+                    id,
+                    &sessao,
+                    json!({ "data": dados, "base64Encoded": true, "eof": eof }),
+                )]
+            }
+            "IO.close" => {
+                let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
+                self.streams.remove(handle);
+                vec![self.ok(id, &sessao, json!({}))]
+            }
+            "Runtime.enable" => {
+                // Contexto do mundo principal: sem ele o FrameManager nunca liga
+                // o frame a um realm e qualquer evaluate fica pendurado.
+                self.contador_contexto += 1;
+                let ctx = self.contador_contexto;
+                vec![
+                    self.evento_bruto(
+                        &sessao,
+                        "Runtime.executionContextCreated",
+                        json!({ "context": self.contexto(ctx, "", true) }),
+                    ),
+                    self.ok(id, &sessao, json!({})),
+                ]
+            }
+            "Page.createIsolatedWorld" => {
+                self.contador_contexto += 1;
+                let ctx = self.contador_contexto;
+                let nome = params
+                    .get("worldName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                vec![
+                    self.evento_bruto(
+                        &sessao,
+                        "Runtime.executionContextCreated",
+                        json!({ "context": self.contexto(ctx, &nome, false) }),
+                    ),
+                    self.ok(id, &sessao, json!({ "executionContextId": ctx })),
+                ]
+            }
+            "Page.addScriptToEvaluateOnNewDocument" => {
+                vec![self.ok(id, &sessao, json!({ "identifier": "1" }))]
+            }
+            // Não há motor de JavaScript: toda avaliação devolve undefined. O
+            // único uso no caminho do PDF é `document.fonts.ready`, e as fontes
+            // já são resolvidas de forma síncrona durante o layout.
+            "Runtime.evaluate" | "Runtime.callFunctionOn" => {
+                vec![self.ok(id, &sessao, json!({ "result": { "type": "undefined" } }))]
             }
             // Aceites sem efeito: nada sai para a rede, nenhum script roda.
             _ => vec![self.ok(id, &sessao, json!({}))],
@@ -121,6 +227,44 @@ impl Session {
         let dl = render_core::render_html(&html, geo.content_width());
         let pages = paginate(&dl, None, None, &geo);
         pdf_out::render_pdf(&pages, &dl.fonts, &geo)
+    }
+
+    fn ler_stream(&mut self, handle: &str) -> (String, bool) {
+        let Some((bytes, pos)) = self.streams.get_mut(handle) else {
+            return (String::new(), true);
+        };
+        let fim = (*pos + CHUNK).min(bytes.len());
+        let pedaco = base64::engine::general_purpose::STANDARD.encode(&bytes[*pos..fim]);
+        *pos = fim;
+        (pedaco, fim >= bytes.len())
+    }
+
+    fn contexto(&self, id: i64, nome: &str, principal: bool) -> Value {
+        json!({
+            "id": id,
+            "origin": "://",
+            "name": nome,
+            "uniqueId": format!("ctx-{id}"),
+            "auxData": {
+                "frameId": self.frame_id,
+                "isDefault": principal,
+                "type": if principal { "default" } else { "isolated" }
+            }
+        })
+    }
+
+    fn frame_info(&self) -> Value {
+        json!({
+            "id": self.frame_id,
+            "loaderId": "loader-1",
+            "url": "about:blank",
+            "domainAndRegistry": "",
+            "securityOrigin": "://",
+            "mimeType": "text/html",
+            "secureContextType": "Secure",
+            "crossOriginIsolatedContextType": "NotIsolated",
+            "gatedAPIFeatures": []
+        })
     }
 
     fn target_info(target_id: &str) -> Value {
@@ -307,5 +451,110 @@ mod tests {
         );
         let ultima = out.last().expect("sem saída");
         assert!(matches!(ultima, Saida::Resposta(_)), "resposta deve fechar o lote");
+    }
+    #[test]
+    fn create_target_emite_attached_sozinho_para_o_auto_attach() {
+        // O Puppeteer liga Target.setAutoAttach e nunca chama attachToTarget:
+        // sem este evento, Browser.waitForTarget fica pendurado até o timeout.
+        let mut s = Session::new();
+        let out = s.handle(r#"{"id":1,"method":"Target.createTarget","params":{"url":"about:blank"}}"#);
+        let evs = eventos(&out);
+        let anexado = evs
+            .iter()
+            .find(|e| e["method"] == "Target.attachedToTarget")
+            .expect("faltou Target.attachedToTarget");
+        assert_eq!(anexado["params"]["sessionId"], "session-1");
+        assert_eq!(anexado["params"]["targetInfo"]["targetId"], "target-1");
+        assert_eq!(anexado["params"]["targetInfo"]["type"], "page");
+    }
+
+    #[test]
+    fn get_frame_tree_devolve_um_frame_de_verdade() {
+        // Resposta vazia fazia o FrameManager estourar em `frameTree.frame`.
+        let mut s = Session::new();
+        let out = s.handle(r#"{"id":1,"method":"Page.getFrameTree","params":{}}"#);
+        let r = respostas(&out);
+        let frame = &r[0]["result"]["frameTree"]["frame"];
+        assert_eq!(frame["id"], "frame-1");
+        assert!(frame["loaderId"].is_string());
+        assert_eq!(frame["mimeType"], "text/html");
+        assert!(r[0]["result"]["frameTree"]["childFrames"].is_array());
+    }
+
+    #[test]
+    fn runtime_enable_publica_o_contexto_do_mundo_principal() {
+        let mut s = Session::new();
+        let out = s.handle(r#"{"id":1,"method":"Runtime.enable","params":{}}"#);
+        let e = &eventos(&out)[0];
+        assert_eq!(e["method"], "Runtime.executionContextCreated");
+        assert_eq!(e["params"]["context"]["auxData"]["isDefault"], true);
+        assert_eq!(e["params"]["context"]["auxData"]["frameId"], "frame-1");
+    }
+
+    #[test]
+    fn isolated_world_publica_contexto_com_o_nome_pedido() {
+        let mut s = Session::new();
+        let out = s.handle(
+            r#"{"id":1,"method":"Page.createIsolatedWorld","params":{"frameId":"frame-1","worldName":"__puppeteer_utility_world__x"}}"#,
+        );
+        let e = &eventos(&out)[0];
+        assert_eq!(e["params"]["context"]["name"], "__puppeteer_utility_world__x");
+        assert_eq!(e["params"]["context"]["auxData"]["isDefault"], false);
+        let ctx = e["params"]["context"]["id"].as_i64().unwrap();
+        assert_eq!(respostas(&out)[0]["result"]["executionContextId"], ctx);
+    }
+
+    #[test]
+    fn evaluate_devolve_undefined_por_nao_haver_motor_de_js() {
+        let mut s = Session::new();
+        let out = s.handle(r#"{"id":1,"method":"Runtime.callFunctionOn","params":{"functionDeclaration":"() => document.fonts.ready"}}"#);
+        assert_eq!(respostas(&out)[0]["result"]["result"]["type"], "undefined");
+    }
+
+    #[test]
+    fn print_to_pdf_em_stream_e_drenado_por_io_read() {
+        use base64::Engine as _;
+        let mut s = Session::new();
+        s.handle(r#"{"id":1,"method":"Page.setDocumentContent","params":{"frameId":"f1","html":"<p>Conteudo</p>"}}"#);
+        let out = s.handle(
+            r#"{"id":2,"method":"Page.printToPDF","params":{"transferMode":"ReturnAsStream","paperWidth":8.27,"paperHeight":11.7}}"#,
+        );
+        let handle = respostas(&out)[0]["result"]["stream"]
+            .as_str()
+            .expect("sem handle de stream")
+            .to_string();
+
+        let mut bytes = Vec::new();
+        let mut voltas = 0;
+        loop {
+            let out = s.handle(&format!(
+                r#"{{"id":3,"method":"IO.read","params":{{"handle":"{handle}"}}}}"#
+            ));
+            let r = &respostas(&out)[0]["result"];
+            assert_eq!(r["base64Encoded"], true);
+            bytes.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(r["data"].as_str().unwrap())
+                    .unwrap(),
+            );
+            voltas += 1;
+            if r["eof"].as_bool().unwrap_or(false) || voltas > 1000 {
+                break;
+            }
+        }
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(bytes.windows(5).any(|w| w == b"%%EOF"));
+
+        let out = s.handle(&format!(
+            r#"{{"id":4,"method":"IO.close","params":{{"handle":"{handle}"}}}}"#
+        ));
+        assert_eq!(respostas(&out).len(), 1);
+    }
+
+    #[test]
+    fn io_read_de_handle_desconhecido_termina_em_vez_de_panicar() {
+        let mut s = Session::new();
+        let out = s.handle(r#"{"id":1,"method":"IO.read","params":{"handle":"nao-existe"}}"#);
+        assert_eq!(respostas(&out)[0]["result"]["eof"], true);
     }
 }

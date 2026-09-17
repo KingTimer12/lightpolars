@@ -22,6 +22,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// CDP_DEBUG=1 espelha o tráfego no stderr — é o que mostra em qual comando o
+/// Puppeteer para de avançar.
+fn depurando() -> bool {
+    std::env::var("CDP_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 async fn atender(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut envio, mut recepcao) = ws.split();
@@ -29,11 +35,17 @@ async fn atender(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(msg) = recepcao.next().await {
         let Message::Text(texto) = msg? else { continue };
+        if depurando() {
+            eprintln!("<- {texto}");
+        }
         for saida in sessao.handle(&texto) {
             let payload = match saida {
                 Saida::Resposta(t) => t,
                 Saida::Evento(t) => t,
             };
+            if depurando() {
+                eprintln!("-> {payload}");
+            }
             envio.send(Message::Text(payload.into())).await?;
         }
     }
