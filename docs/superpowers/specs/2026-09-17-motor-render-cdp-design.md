@@ -89,14 +89,16 @@ conteúdo — daí `margin.top: 51mm` em `_pdf.js` precisar comportar a logo.
 
 ### Texto selecionável
 
-Verificado por spike. O caminho é
-`parley::Layout::lines() -> Line::runs() -> Run::font()` (FontData: blob + índice)
-`-> Run::clusters() -> Cluster::glyphs()` (id + x/y), com `Line::baseline()`/
-`offset()` e `text_range()` para montar o ToUnicode. `blitz-dom` expõe o
-`parley::Layout` por elemento em `ElementData::inline_layout_data`.
+Verificado por spike e corrigido na implementação. `blitz-dom` expõe o
+`parley::Layout` por elemento em `ElementData::inline_layout_data`, e o caminho
+até os glifos posicionados é `Layout::lines() -> Line::items()`, filtrando
+`PositionedLayoutItem::GlyphRun`, que dá `baseline()`, `offset()`, `glyphs()`
+(id + x/y) e `run()` (com `font()` = blob + índice, e `font_size()`).
 
-Atenção: blitz usa **parley 0.11**, cuja API de glifos está no cluster, não na
-linha (difere da 0.6).
+Atenção à versão: `blitz-dom` 0.2.4 fixa **parley 0.6**, não 0.11. Declarar 0.11
+duplica a crate e os tipos de `inline_layout_data` deixam de casar. O acesso ao
+estilo computado exige somar `style = { package = "stylo", version = "0.8" }`,
+porque `blitz-dom` não reexporta `ComputedValues`.
 
 ## Superfície CDP
 

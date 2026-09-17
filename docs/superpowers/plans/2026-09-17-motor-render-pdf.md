@@ -415,8 +415,8 @@ Notas de API confirmadas por spike, para não perder tempo:
 `doc.set_viewport(Viewport::new(w_u32, h_u32, 1.0, ColorScheme::Light))`;
 `doc.resolve(0.0)`; iteração por `doc.tree().iter()` (o campo `nodes` é privado);
 layout em `node.final_layout`; texto em `node.element_data().inline_layout_data`,
-que é um `parley::Layout` da **parley 0.11** — os glifos estão no cluster
-(`line.runs() -> run.clusters() -> cluster.glyphs()`), não na linha.
+que é um `parley::Layout` da **parley 0.6** (versão que blitz-dom 0.2.4 fixa) —
+os glifos vêm de `line.items()` filtrando `PositionedLayoutItem::GlyphRun`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
