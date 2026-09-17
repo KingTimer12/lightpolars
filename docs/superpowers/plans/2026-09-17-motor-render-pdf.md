@@ -686,7 +686,7 @@ git commit -m "feat(render-core): layout via blitz e extração da display list"
   - `Page { boxes: Vec<BoxItem>, texts: Vec<TextRun> }` — coordenadas já em
     espaço de folha, com as margens aplicadas.
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 `crates/paginate/src/lib.rs`:
 
@@ -819,12 +819,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Rodar o teste e confirmar que falha**
+- [x] **Step 2: Rodar o teste e confirmar que falha**
 
 Run: `cargo test -p paginate`
 Expected: FAIL — pacote inexistente.
 
-- [ ] **Step 3: Escrever a implementação**
+- [x] **Step 3: Escrever a implementação**
 
 `crates/paginate/Cargo.toml`:
 
@@ -1000,12 +1000,12 @@ fn empilhar(page: &mut Page, fonte: &DisplayList, dx: f32, dy: f32) {
 }
 ```
 
-- [ ] **Step 4: Rodar os testes e confirmar que passam**
+- [x] **Step 4: Rodar os testes e confirmar que passam**
 
 Run: `cargo test -p paginate`
 Expected: PASS, 7 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/paginate Cargo.toml
@@ -1029,7 +1029,7 @@ API do `printpdf` 0.12.8 já verificada: `ParsedFont::from_bytes(&bytes, index, 
 `TextItem::GlyphIds(Vec<u16>)`, `doc.with_pages(...)`, `doc.save(&opts, &mut warnings)`.
 Subsetting e ToUnicode são tratados pela própria crate.
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 `crates/pdf-out/src/lib.rs`:
 
@@ -1101,12 +1101,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Rodar o teste e confirmar que falha**
+- [x] **Step 2: Rodar o teste e confirmar que falha**
 
 Run: `cargo test -p pdf-out`
 Expected: FAIL — pacote inexistente.
 
-- [ ] **Step 3: Escrever a implementação**
+- [x] **Step 3: Escrever a implementação**
 
 `crates/pdf-out/Cargo.toml`:
 
@@ -1247,7 +1247,7 @@ fn ponto(x: f32, y: f32) -> LinePoint {
 }
 ```
 
-- [ ] **Step 4: Ajustar contra a API real e fazer passar**
+- [x] **Step 4: Ajustar contra a API real e fazer passar**
 
 Run: `cargo test -p pdf-out`
 
@@ -1268,7 +1268,7 @@ Se `WriteCodepoints` não existir nessa versão, usar
 
 Expected ao final: PASS, 3 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/pdf-out Cargo.toml
