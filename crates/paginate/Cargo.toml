@@ -1,0 +1,7 @@
+[package]
+name = "paginate"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+render-ir.workspace = true
