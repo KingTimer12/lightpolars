@@ -1,0 +1,41 @@
+[
+  {
+    "nome": "pdf-ia-com-header",
+    "html": "pdf_ia.html",
+    "waitUntil": "load",
+    "pdfOptions": {
+      "format": "A4",
+      "printBackground": true,
+      "margin": { "top": "51mm", "right": "15mm", "bottom": "20mm", "left": "15mm" }
+    }
+  },
+  {
+    "nome": "funcionarios-landscape",
+    "html": "funcionarios.html",
+    "waitUntil": "networkidle0",
+    "pdfOptions": {
+      "format": "A4",
+      "landscape": true,
+      "printBackground": true,
+      "margin": { "top": "20mm", "right": "15mm", "bottom": "20mm", "left": "15mm" }
+    }
+  },
+  {
+    "nome": "documento-ged",
+    "html": "documento.html",
+    "pdfOptions": {
+      "format": "A4",
+      "printBackground": true,
+      "margin": { "top": "0cm", "right": "2cm", "bottom": "0cm", "left": "2cm" }
+    }
+  },
+  {
+    "nome": "recibo",
+    "html": "recibo.html",
+    "pdfOptions": {
+      "format": "A4",
+      "printBackground": true,
+      "margin": { "top": "0.1cm", "right": "1cm", "bottom": "1cm", "left": "1cm" }
+    }
+  }
+]

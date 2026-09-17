@@ -12,11 +12,14 @@ pub enum Saida {
     Evento(String),
 }
 
+const SESSION_ID: &str = "session-1";
+
 #[derive(Default)]
 pub struct Session {
     html: Option<String>,
     frame_id: String,
     contador_target: u32,
+    ultimo_target: Option<String>,
 }
 
 impl Session {
@@ -31,15 +34,60 @@ impl Session {
         let id = v.get("id").and_then(Value::as_i64).unwrap_or(0);
         let metodo = v.get("method").and_then(Value::as_str).unwrap_or("");
         let params = v.get("params").cloned().unwrap_or_else(|| json!({}));
+        // Modo flatten: toda mensagem de uma sessão anexada carrega sessionId, e
+        // a resposta precisa devolver o mesmo campo ou o Puppeteer nunca a casa
+        // com o comando e fica esperando.
+        let sessao = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
 
         match metodo {
+            "Browser.getVersion" => vec![self.ok(
+                id,
+                &sessao,
+                json!({
+                    "protocolVersion": "1.3",
+                    "product": "HeadlessChrome/0.0.0",
+                    "revision": "0",
+                    "userAgent": "cdp-server",
+                    "jsVersion": "0"
+                }),
+            )],
+            "Target.getBrowserContexts" => {
+                vec![self.ok(id, &sessao, json!({ "browserContextIds": [] }))]
+            }
             "Target.createTarget" => {
                 self.contador_target += 1;
                 let tid = format!("target-{}", self.contador_target);
-                vec![self.ok(id, json!({ "targetId": tid }))]
+                self.ultimo_target = Some(tid.clone());
+                vec![
+                    self.evento_bruto(
+                        &sessao,
+                        "Target.targetCreated",
+                        json!({ "targetInfo": Self::target_info(&tid) }),
+                    ),
+                    self.ok(id, &sessao, json!({ "targetId": tid })),
+                ]
             }
             "Target.attachToTarget" => {
-                vec![self.ok(id, json!({ "sessionId": "session-1" }))]
+                let tid = params
+                    .get("targetId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| self.ultimo_target.clone())
+                    .unwrap_or_else(|| "target-1".to_string());
+                vec![
+                    // O evento vem antes da resposta: o Puppeteer registra a
+                    // CDPSession ao vê-lo, e só então casa o result.
+                    self.evento_bruto(
+                        &sessao,
+                        "Target.attachedToTarget",
+                        json!({
+                            "sessionId": SESSION_ID,
+                            "targetInfo": Self::target_info(&tid),
+                            "waitingForDebugger": false
+                        }),
+                    ),
+                    self.ok(id, &sessao, json!({ "sessionId": SESSION_ID })),
+                ]
             }
             "Page.setDocumentContent" => {
                 self.html = params
@@ -47,19 +95,23 @@ impl Session {
                     .and_then(Value::as_str)
                     .map(str::to_string);
 
-                let mut saidas = vec![self.ok(id, json!({}))];
-                for nome in ["init", "load", "DOMContentLoaded", "networkIdle"] {
-                    saidas.push(self.lifecycle(nome));
-                }
+                // Os eventos saem antes da resposta: o LifecycleWatcher do
+                // Puppeteer só começa a resolver depois de ver o ciclo completo,
+                // e assim a ordem na rede não depende de corrida.
+                let mut saidas: Vec<Saida> = ["init", "load", "DOMContentLoaded", "networkIdle"]
+                    .into_iter()
+                    .map(|nome| self.lifecycle(&sessao, nome))
+                    .collect();
+                saidas.push(self.ok(id, &sessao, json!({})));
                 saidas
             }
             "Page.printToPDF" => {
                 let bytes = self.gerar_pdf(&params);
                 let dados = base64::engine::general_purpose::STANDARD.encode(bytes);
-                vec![self.ok(id, json!({ "data": dados }))]
+                vec![self.ok(id, &sessao, json!({ "data": dados }))]
             }
             // Aceites sem efeito: nada sai para a rede, nenhum script roda.
-            _ => vec![self.ok(id, json!({}))],
+            _ => vec![self.ok(id, &sessao, json!({}))],
         }
     }
 
@@ -71,22 +123,46 @@ impl Session {
         pdf_out::render_pdf(&pages, &dl.fonts, &geo)
     }
 
-    fn ok(&self, id: i64, result: Value) -> Saida {
-        Saida::Resposta(json!({ "id": id, "result": result }).to_string())
+    fn target_info(target_id: &str) -> Value {
+        json!({
+            "targetId": target_id,
+            "type": "page",
+            "title": "",
+            "url": "about:blank",
+            "attached": true,
+            "canAccessOpener": false,
+            "browserContextId": "context-1"
+        })
     }
 
-    fn lifecycle(&self, nome: &str) -> Saida {
-        Saida::Evento(
+    fn ok(&self, id: i64, sessao: &Option<String>, result: Value) -> Saida {
+        let mut msg = json!({ "id": id, "result": result });
+        Self::marcar_sessao(&mut msg, sessao);
+        Saida::Resposta(msg.to_string())
+    }
+
+    fn evento_bruto(&self, sessao: &Option<String>, method: &str, params: Value) -> Saida {
+        let mut msg = json!({ "method": method, "params": params });
+        Self::marcar_sessao(&mut msg, sessao);
+        Saida::Evento(msg.to_string())
+    }
+
+    fn marcar_sessao(msg: &mut Value, sessao: &Option<String>) {
+        if let (Some(obj), Some(sid)) = (msg.as_object_mut(), sessao.as_ref()) {
+            obj.insert("sessionId".into(), Value::String(sid.clone()));
+        }
+    }
+
+    fn lifecycle(&self, sessao: &Option<String>, nome: &str) -> Saida {
+        self.evento_bruto(
+            sessao,
+            "Page.lifecycleEvent",
             json!({
-                "method": "Page.lifecycleEvent",
-                "params": {
-                    "frameId": self.frame_id,
-                    "loaderId": "loader-1",
-                    "name": nome,
-                    "timestamp": 0.0
-                }
-            })
-            .to_string(),
+                "frameId": self.frame_id,
+                "loaderId": "loader-1",
+                "name": nome,
+                "timestamp": 0.0
+            }),
         )
     }
 }
@@ -181,5 +257,55 @@ mod tests {
         let mut s = Session::new();
         let out = s.handle(r#"{"id":1,"method":"Page.printToPDF","params":{}}"#);
         assert_eq!(respostas(&out).len(), 1);
+    }
+    #[test]
+    fn attach_emite_o_evento_antes_da_resposta() {
+        let mut s = Session::new();
+        s.handle(r#"{"id":1,"method":"Target.createTarget","params":{"url":"about:blank"}}"#);
+        let out = s.handle(r#"{"id":2,"method":"Target.attachToTarget","params":{"targetId":"target-1","flatten":true}}"#);
+
+        // Ordem importa: o Puppeteer registra a CDPSession ao ver o evento.
+        assert!(matches!(out[0], Saida::Evento(_)), "evento deve vir antes da resposta");
+        let e = &eventos(&out)[0];
+        assert_eq!(e["method"], "Target.attachedToTarget");
+        assert_eq!(e["params"]["sessionId"], "session-1");
+        assert_eq!(e["params"]["targetInfo"]["targetId"], "target-1");
+        assert_eq!(e["params"]["targetInfo"]["type"], "page");
+
+        let r = respostas(&out);
+        assert_eq!(r[0]["result"]["sessionId"], "session-1");
+    }
+
+    #[test]
+    fn session_id_do_comando_volta_na_resposta_e_nos_eventos() {
+        let mut s = Session::new();
+        let out = s.handle(
+            r#"{"id":3,"sessionId":"session-1","method":"Page.setDocumentContent","params":{"frameId":"f1","html":"<p>oi</p>"}}"#,
+        );
+        for r in respostas(&out) {
+            assert_eq!(r["sessionId"], "session-1", "resposta sem sessionId não casa com o comando");
+        }
+        for e in eventos(&out) {
+            assert_eq!(e["sessionId"], "session-1", "evento de sessão precisa do sessionId");
+        }
+    }
+
+    #[test]
+    fn comando_sem_session_id_nao_ganha_o_campo() {
+        let mut s = Session::new();
+        let out = s.handle(r#"{"id":4,"method":"Target.getBrowserContexts","params":{}}"#);
+        let r = respostas(&out);
+        assert!(r[0].get("sessionId").is_none());
+        assert!(r[0]["result"]["browserContextIds"].is_array());
+    }
+
+    #[test]
+    fn ciclo_de_vida_sai_antes_da_resposta_de_set_document_content() {
+        let mut s = Session::new();
+        let out = s.handle(
+            r#"{"id":5,"method":"Page.setDocumentContent","params":{"frameId":"f1","html":"<p>oi</p>"}}"#,
+        );
+        let ultima = out.last().expect("sem saída");
+        assert!(matches!(ultima, Saida::Resposta(_)), "resposta deve fechar o lote");
     }
 }

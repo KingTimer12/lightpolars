@@ -1295,7 +1295,7 @@ Ausência de campo significa o padrão do Chrome: margem 1cm (0.393701in), papel
 carta 8.5x11in — mas todos os call sites passam `format: 'A4'`, que o Puppeteer
 traduz para 8.27x11.7in.
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 `crates/cdp-server/src/params.rs`:
 
@@ -1356,12 +1356,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Rodar o teste e confirmar que falha**
+- [x] **Step 2: Rodar o teste e confirmar que falha**
 
 Run: `cargo test -p cdp-server params`
 Expected: FAIL — pacote inexistente.
 
-- [ ] **Step 3: Escrever a implementação**
+- [x] **Step 3: Escrever a implementação**
 
 `crates/cdp-server/Cargo.toml`:
 
@@ -1440,12 +1440,12 @@ pub fn geometry_from_print_params(params: &Value) -> PageGeometry {
 }
 ```
 
-- [ ] **Step 4: Rodar os testes e confirmar que passam**
+- [x] **Step 4: Rodar os testes e confirmar que passam**
 
 Run: `cargo test -p cdp-server params`
 Expected: PASS, 5 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/cdp-server Cargo.toml
@@ -1471,7 +1471,7 @@ git commit -m "feat(cdp-server): parsing dos parâmetros de printToPDF"
 Separar a máquina de estados do transporte é o que torna isto testável sem abrir
 socket. O `main` só liga WebSocket a `Session::handle`.
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 `crates/cdp-server/src/session.rs`:
 
@@ -1564,12 +1564,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Rodar o teste e confirmar que falha**
+- [x] **Step 2: Rodar o teste e confirmar que falha**
 
 Run: `cargo test -p cdp-server session`
 Expected: FAIL — `Session` não existe.
 
-- [ ] **Step 3: Escrever a implementação**
+- [x] **Step 3: Escrever a implementação**
 
 Somar a `crates/cdp-server/Cargo.toml`: `base64 = "0.22"`.
 
@@ -1677,12 +1677,12 @@ impl Session {
 }
 ```
 
-- [ ] **Step 4: Rodar os testes e confirmar que passam**
+- [x] **Step 4: Rodar os testes e confirmar que passam**
 
 Run: `cargo test -p cdp-server`
 Expected: PASS, 10 testes (5 de `params`, 5 de `session`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/cdp-server Cargo.toml
@@ -1710,7 +1710,7 @@ consumidor. O repositório guarda apenas os scripts e `casos.json` (opções de
 - Consumes: `cdp_server::session::{Session, Saida}`.
 - Produces: binário que escuta em `ws://127.0.0.1:9222`.
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 `tests/aceitacao/rodar.js` — teste de ponta a ponta contra o motor:
 
@@ -1796,7 +1796,7 @@ for (const caso of CASOS) {
 await browser.close()
 ```
 
-- [ ] **Step 2: Montar os casos e confirmar que o teste falha**
+- [x] **Step 2: Montar os casos e confirmar que o teste falha**
 
 Criar `tests/aceitacao/casos.json` com os quatro fluxos reais, copiando as opções
 verbatim dos call sites da API consumidora:
@@ -1878,7 +1878,7 @@ editor rico (parágrafos, títulos, uma tabela simples, uma imagem `data:`).
 Run: `node tests/aceitacao/rodar.js`
 Expected: FAIL — conexão recusada, o servidor ainda não existe.
 
-- [ ] **Step 3: Escrever o binário**
+- [x] **Step 3: Escrever o binário**
 
 `crates/cdp-server/src/main.rs`:
 
@@ -1959,7 +1959,7 @@ PUPPETEER_EXTRA_LAUNCH_ARGS= DEBUG="puppeteer:protocol:*" node tests/aceitacao/r
 
 e implementar em `session.rs` o que aparecer faltando.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/cdp-server tests/aceitacao

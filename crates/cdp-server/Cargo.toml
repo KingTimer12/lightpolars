@@ -14,3 +14,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+
+[[bin]]
+name = "cdp-server"
+path = "src/main.rs"
