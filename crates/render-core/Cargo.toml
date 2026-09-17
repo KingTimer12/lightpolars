@@ -1,0 +1,20 @@
+[package]
+name = "render-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+render-ir.workspace = true
+base64 = "0.22"
+percent-encoding = "2"
+blitz-dom = "0.2.4"
+blitz-html = "0.2.0"
+blitz-traits = "0.2"
+parley = "0.6"
+style = { package = "stylo", version = "0.8" }
+slab = "0.4"
+# O blitz-dom declara `image` com default-features = false, ou seja, sem codec
+# nenhum: todo <img> falha com "Could not parse image". Esta dependência existe
+# só para ligar os formatos pela unificação de features do cargo — nenhum código
+# nosso chama a crate diretamente.
+image = { version = "=0.25.6", default-features = false, features = ["png", "jpeg", "webp"] }

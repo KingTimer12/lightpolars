@@ -1,0 +1,20 @@
+[package]
+name = "cdp-server"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+render-ir.workspace = true
+render-core.workspace = true
+paginate.workspace = true
+pdf-out.workspace = true
+base64 = "0.22"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+[[bin]]
+name = "cdp-server"
+path = "src/main.rs"

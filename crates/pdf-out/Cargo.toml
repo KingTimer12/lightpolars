@@ -1,0 +1,9 @@
+[package]
+name = "pdf-out"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+render-ir.workspace = true
+paginate.workspace = true
+printpdf = "0.12.8"

@@ -1,6 +1,14 @@
-[package]
-name = "lightpolars"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["crates/render-ir", "crates/render-core", "crates/paginate", "crates/pdf-out", "crates/cdp-server"]
 
-[dependencies]
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+render-ir = { path = "crates/render-ir" }
+render-core = { path = "crates/render-core" }
+paginate = { path = "crates/paginate" }
+pdf-out = { path = "crates/pdf-out" }
+cdp-server = { path = "crates/cdp-server" }
