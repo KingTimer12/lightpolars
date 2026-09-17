@@ -1685,6 +1685,13 @@ git commit -m "feat(cdp-server): sessão CDP com eventos de ciclo de vida e prin
 - Modify: `crates/cdp-server/Cargo.toml`
 - Create: `tests/aceitacao/gerar_goldens.js`
 - Create: `tests/aceitacao/rodar.js`
+- Create: `tests/aceitacao/.gitignore`
+- Create: `tests/aceitacao/README.md`
+
+**Fixtures não são versionadas.** Os HTMLs reais e os PDFs golden ficam fora do
+versionamento: carregam marca, logo em base64 e texto identificável do sistema
+consumidor. O repositório guarda apenas os scripts e `casos.json` (opções de
+`page.pdf`, sem conteúdo). Cada máquina gera os seus.
 
 **Interfaces:**
 - Consumes: `cdp_server::session::{Session, Saida}`.
@@ -1825,9 +1832,35 @@ verbatim dos call sites da API consumidora:
 ]
 ```
 
-Extrair os quatro HTMLs da API consumidora para `tests/aceitacao/html/`,
-substituindo as interpolações por conteúdo representativo de TinyMCE (parágrafos,
-títulos, uma tabela simples, uma imagem `data:`).
+Criar `tests/aceitacao/.gitignore` para manter fixtures e goldens fora do repositório:
+
+```gitignore
+html/
+golden/
+```
+
+E `tests/aceitacao/README.md`:
+
+```markdown
+# Aceitação
+
+Os HTMLs de entrada (`html/`) e os PDFs de referência (`golden/`) não são
+versionados: contêm conteúdo identificável do sistema consumidor.
+
+Para preparar a suíte numa máquina nova:
+
+1. Copie os quatro HTMLs reais dos fluxos de `page.pdf` para `html/`, com os nomes
+   declarados em `casos.json` (`pdf_ia.html`, `funcionarios.html`,
+   `documento.html`, `recibo.html`). Substitua apenas as interpolações de template
+   por conteúdo representativo — mantenha o CSS intacto, é ele que está sob teste.
+2. Rode `node gerar_goldens.js` a partir da raiz do repositório para produzir
+   `golden/` com o Chromium atual.
+3. Rode `node rodar.js` com o motor no ar.
+```
+
+Depois disso, montar `html/` seguindo o README — copiando os quatro HTMLs reais dos
+fluxos de `page.pdf` e trocando as interpolações por conteúdo representativo de
+editor rico (parágrafos, títulos, uma tabela simples, uma imagem `data:`).
 
 Run: `node tests/aceitacao/rodar.js`
 Expected: FAIL — conexão recusada, o servidor ainda não existe.
@@ -1917,6 +1950,7 @@ e implementar em `session.rs` o que aparecer faltando.
 
 ```bash
 git add crates/cdp-server tests/aceitacao
+git status --short tests/aceitacao   # confirme: nenhum arquivo de html/ ou golden/
 git commit -m "feat(cdp-server): binário WebSocket e aceitação com Puppeteer real"
 ```
 
