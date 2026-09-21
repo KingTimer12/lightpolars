@@ -10,19 +10,40 @@ WebSocket.
 ## Arquitetura
 
 ```
-crates/render-ir     tipos puros trocados entre os crates: Rect, Glyph, TextRun,
+crates/render-ir      tipos puros trocados entre os crates: Rect, Glyph, TextRun,
                       BoxItem, ImageItem, DisplayList, conversões de unidade
-crates/render-core    dá layout ao HTML via blitz-dom e extrai uma DisplayList
-                      (caixas, runs de glifos, imagens)
-crates/paginate       corta uma DisplayList contínua em páginas A4, com margens,
-                      paisagem e faixa de header/footer
-crates/pdf-out        emite Vec<Page> como PDF: texto vetorial selecionável,
-                      imagens como XObject
-crates/raster-out     emite uma Page como PNG/JPEG: mesmo desenho do pdf-out,
-                      mas tudo rasterizado (tiny-skia + swash para os glifos)
-crates/cdp-server     binário: servidor WebSocket que fala o subconjunto do CDP
-                      que o Puppeteer usa para setContent + printToPDF +
-                      captureScreenshot
+
+crates/render-core    layout do HTML via blitz-dom e extração da DisplayList
+  extract.rs          percorre a árvore e emite caixas, runs e imagens
+  style.rs            lê fundo, borda e cor dos valores computados do stylo
+  net.rs              provedor de recursos restrito a data:
+  resource.rs         decodificação de data: URI
+  svg/raster.rs       usvg + resvg -> RGBA
+  svg/inline.rs       <svg> inline -> <img src="data:...">
+
+crates/paginate       aritmética pura de retângulos, sem renderizar nada
+  geometry.rs         folha e margens (A4, retrato/paisagem)
+  page.rs             uma página e o empilhamento de itens
+  slicer.rs           caminho de impressão: corte em folhas, header/footer
+  capture.rs          caminho de screenshot: documento inteiro ou recorte
+  fonts.rs            tabela de fontes única do documento
+
+crates/pdf-out        emite Vec<Page> como PDF
+  draw.rs             itens -> operadores do content stream
+
+crates/raster-out     emite uma Page como PNG/JPEG
+  canvas.rs           caixas e bitmaps (tiny-skia)
+  text.rs             glifos (swash) e composição da máscara
+  encode.rs           pixmap -> bytes
+
+crates/cdp-server     binário: servidor WebSocket do subconjunto do CDP
+  session/wire.rs     formato das mensagens: Command, Output, sessionId
+  session/page.rs     estado de uma página aberta (html, viewport, escala)
+  session/streams.rs  streams do ReturnAsStream, drenados por IO.read
+  session/mod.rs      estado + tabela de roteamento
+  handlers/           um módulo por grupo de métodos: target, page, print,
+                      screenshot, runtime
+  print_params.rs     parâmetros do printToPDF -> PageGeometry
 ```
 
 `render-ir` existe para `paginate` não depender do blitz (via `render-core`) só
@@ -87,7 +108,7 @@ confiável. Vale tanto para `<img>` quanto para folhas de estilo e fontes.
 ## Testes
 
 ```bash
-cargo test --workspace          # 113 testes de unidade/integração
+cargo test --workspace          # 112 testes de unidade/integração
 ```
 
 Aceitação ponta a ponta com Puppeteer real, em `tests/aceitacao/`:

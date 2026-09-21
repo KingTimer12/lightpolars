@@ -1,0 +1,149 @@
+//! Turning display-list items into PDF content-stream operators.
+//!
+//! PDF has its origin at the bottom left, the display list at the top left, so
+//! every y here is mirrored against the sheet height.
+
+use crate::pt;
+use paginate::Page;
+use printpdf::*;
+use std::collections::HashMap;
+
+/// Identity of an already-embedded bitmap: its dimensions plus the address of
+/// the shared buffer, which is what the display list's `Arc` preserves across
+/// pages.
+type ImageKey = (u32, u32, usize);
+
+#[derive(Default)]
+pub struct ImageCache(HashMap<ImageKey, XObjectId>);
+
+pub fn draw_boxes(ops: &mut Vec<Op>, page: &Page, height_pt: f32) {
+    for b in &page.boxes {
+        if let Some(color) = b.background {
+            ops.push(Op::SetFillColor { col: rgb_color(color) });
+            ops.push(rect_op(b.rect, height_pt, PaintMode::Fill));
+        }
+        if b.border_width > 0.0
+            && let Some(color) = b.border_color
+        {
+            ops.push(Op::SetOutlineColor { col: rgb_color(color) });
+            ops.push(Op::SetOutlineThickness { pt: Pt(pt(b.border_width)) });
+            ops.push(rect_op(b.rect, height_pt, PaintMode::Stroke));
+        }
+    }
+}
+
+pub fn draw_images(
+    ops: &mut Vec<Op>,
+    doc: &mut PdfDocument,
+    cache: &mut ImageCache,
+    page: &Page,
+    height_pt: f32,
+) {
+    for img in &page.images {
+        if img.width_px == 0 || img.height_px == 0 || img.rgba.is_empty() {
+            continue;
+        }
+        let key = (
+            img.width_px,
+            img.height_px,
+            std::sync::Arc::as_ptr(&img.rgba) as usize,
+        );
+        let id = cache.0.entry(key).or_insert_with(|| {
+            doc.add_image(&RawImage {
+                pixels: RawImageData::U8(img.rgba.as_ref().clone()),
+                width: img.width_px as usize,
+                height: img.height_px as usize,
+                data_format: RawImageFormat::RGBA8,
+                tag: Vec::new(),
+            })
+        });
+
+        // At dpi = 72 the UseXobject auto-scaling puts the bitmap at 1px = 1pt;
+        // scale_x/y take it from there to the layout box.
+        ops.push(Op::UseXobject {
+            id: id.clone(),
+            transform: XObjectTransform {
+                translate_x: Some(Pt(pt(img.rect.x))),
+                translate_y: Some(Pt(height_pt - pt(img.rect.y) - pt(img.rect.height))),
+                scale_x: Some(pt(img.rect.width) / img.width_px as f32),
+                scale_y: Some(pt(img.rect.height) / img.height_px as f32),
+                rotate: None,
+                dpi: Some(72.0),
+                no_auto_scale: false,
+            },
+        });
+    }
+}
+
+pub fn draw_text(ops: &mut Vec<Op>, page: &Page, font_ids: &[Option<FontId>], height_pt: f32) {
+    for run in &page.texts {
+        let Some(Some(font_id)) = font_ids.get(run.font_index) else {
+            continue;
+        };
+        if run.glyphs.is_empty() {
+            continue;
+        }
+        let handle = PdfFontHandle::External(font_id.clone());
+
+        ops.push(Op::StartTextSection);
+        ops.push(Op::SetFillColor { col: rgb_color(run.color) });
+        ops.push(Op::SetFont { font: handle.clone(), size: Pt(pt(run.font_size_px)) });
+
+        // One glyph at a time, each with its own text matrix: shaping already
+        // gave the absolute position of every glyph inside the run, so there is
+        // no advance to recompute here.
+        let mut chars = run.text.chars();
+        for g in &run.glyphs {
+            let x = pt(run.origin_x + g.x);
+            let y = height_pt - pt(run.baseline_y + g.y);
+            ops.push(Op::SetTextMatrix {
+                matrix: TextMatrix::Translate(Pt(x), Pt(y)),
+            });
+            ops.push(Op::ShowText {
+                items: vec![TextItem::GlyphIds(vec![Codepoint {
+                    gid: g.id,
+                    offset: 0.0,
+                    // Feeds ToUnicode so the text comes out selectable.
+                    cid: chars.next().map(String::from),
+                }])],
+            });
+        }
+
+        ops.push(Op::EndTextSection);
+    }
+}
+
+fn rgb_color(c: [u8; 3]) -> Color {
+    Color::Rgb(Rgb {
+        r: c[0] as f32 / 255.0,
+        g: c[1] as f32 / 255.0,
+        b: c[2] as f32 / 255.0,
+        icc_profile: None,
+    })
+}
+
+fn rect_op(r: render_ir::Rect, height_pt: f32, mode: PaintMode) -> Op {
+    let x = pt(r.x);
+    let y = height_pt - pt(r.y) - pt(r.height);
+    Op::DrawPolygon {
+        polygon: Polygon {
+            rings: vec![PolygonRing {
+                points: vec![
+                    point(x, y),
+                    point(x + pt(r.width), y),
+                    point(x + pt(r.width), y + pt(r.height)),
+                    point(x, y + pt(r.height)),
+                ],
+            }],
+            mode,
+            winding_order: WindingOrder::NonZero,
+        },
+    }
+}
+
+fn point(x: f32, y: f32) -> LinePoint {
+    LinePoint {
+        p: Point { x: Pt(x), y: Pt(y) },
+        bezier: false,
+    }
+}

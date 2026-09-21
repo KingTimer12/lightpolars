@@ -1,52 +1,52 @@
-//! Servidor CDP. Não executa JavaScript e não acessa a rede: todo recurso do
-//! HTML precisa ser data: URI.
+//! CDP server. Runs no JavaScript and touches no network: every resource in
+//! the HTML must be a data: URI.
 
-use cdp_server::session::{Saida, Session};
+use cdp_server::session::{Output, Session};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endereco = std::env::var("CDP_ADDR").unwrap_or_else(|_| "127.0.0.1:9222".to_string());
-    let listener = TcpListener::bind(&endereco).await?;
-    println!("CDP escutando em ws://{endereco}");
+    let address = std::env::var("CDP_ADDR").unwrap_or_else(|_| "127.0.0.1:9222".to_string());
+    let listener = TcpListener::bind(&address).await?;
+    println!("CDP listening on ws://{address}");
 
     while let Ok((stream, _)) = listener.accept().await {
         tokio::spawn(async move {
-            if let Err(e) = atender(stream).await {
-                eprintln!("sessão encerrada: {e}");
+            if let Err(e) = serve(stream).await {
+                eprintln!("session ended: {e}");
             }
         });
     }
     Ok(())
 }
 
-/// CDP_DEBUG=1 espelha o tráfego no stderr — é o que mostra em qual comando o
-/// Puppeteer para de avançar.
-fn depurando() -> bool {
+/// CDP_DEBUG=1 mirrors the traffic on stderr — that is what shows which command
+/// Puppeteer stops advancing on.
+fn debugging() -> bool {
     std::env::var("CDP_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-async fn atender(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
-    let (mut envio, mut recepcao) = ws.split();
-    let mut sessao = Session::new();
+    let (mut sink, mut source) = ws.split();
+    let mut session = Session::new();
 
-    while let Some(msg) = recepcao.next().await {
-        let Message::Text(texto) = msg? else { continue };
-        if depurando() {
-            eprintln!("<- {texto}");
+    while let Some(msg) = source.next().await {
+        let Message::Text(text) = msg? else { continue };
+        if debugging() {
+            eprintln!("<- {text}");
         }
-        for saida in sessao.handle(&texto) {
-            let payload = match saida {
-                Saida::Resposta(t) => t,
-                Saida::Evento(t) => t,
+        for output in session.handle(&text) {
+            let payload = match output {
+                Output::Response(t) => t,
+                Output::Event(t) => t,
             };
-            if depurando() {
+            if debugging() {
                 eprintln!("-> {payload}");
             }
-            envio.send(Message::Text(payload.into())).await?;
+            sink.send(Message::Text(payload)).await?;
         }
     }
     Ok(())

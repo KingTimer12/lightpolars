@@ -1,178 +1,53 @@
-//! Emissão de PDF a partir de páginas já paginadas.
-//! Texto sai como operador de texto com glifos posicionados — nunca rasterizado.
+//! PDF emission from already-paginated pages.
+//! Text comes out as text operators with positioned glyphs — never rasterized.
 
+mod draw;
+
+use draw::{ImageCache, draw_boxes, draw_images, draw_text};
 use paginate::{Page, PageGeometry};
 use printpdf::*;
 use render_ir::FontResource;
-use std::collections::HashMap;
 
-/// Identidade de um bitmap já embutido: dimensões mais o endereço do buffer
-/// compartilhado, que é o que o `Arc` da display list preserva entre páginas.
-type ChaveImagem = (u32, u32, usize);
-
-/// PDF trabalha em pt; o resto do motor em px a 96dpi.
-fn pt(px: f32) -> f32 {
+/// PDF works in pt; the rest of the engine in px at 96dpi.
+pub(crate) fn pt(px: f32) -> f32 {
     px * 0.75
 }
 
-const PT_POR_MM: f32 = 72.0 / 25.4;
+const PT_PER_MM: f32 = 72.0 / 25.4;
 
 pub fn render_pdf(pages: &[Page], fonts: &[FontResource], geo: &PageGeometry) -> Vec<u8> {
     let mut doc = PdfDocument::new("documento");
-    let mut avisos_fonte = Vec::new();
+    let mut font_warnings = Vec::new();
 
-    let ids: Vec<Option<FontId>> = fonts
+    let font_ids: Vec<Option<FontId>> = fonts
         .iter()
         .map(|f| {
-            ParsedFont::from_bytes(&f.bytes, f.face_index, &mut avisos_fonte)
+            ParsedFont::from_bytes(&f.bytes, f.face_index, &mut font_warnings)
                 .map(|parsed| doc.add_font(&parsed))
         })
         .collect();
 
-    // Um XObject por imagem distinta; páginas repetem o mesmo id (uma logo de
-    // header não é reembutida por página).
-    let mut cache_imagens: HashMap<ChaveImagem, XObjectId> = HashMap::new();
+    // One XObject per distinct image; pages reuse the same id (a header logo is
+    // not re-embedded once per page).
+    let mut image_cache = ImageCache::default();
 
-    let largura_pt = pt(geo.sheet_width);
-    let altura_pt = pt(geo.sheet_height);
+    let width_pt = pt(geo.sheet_width);
+    let height_pt = pt(geo.sheet_height);
 
-    let paginas: Vec<PdfPage> = pages
+    let pdf_pages: Vec<PdfPage> = pages
         .iter()
         .map(|page| {
             let mut ops = Vec::new();
-
-            for b in &page.boxes {
-                if let Some(cor) = b.background {
-                    ops.push(Op::SetFillColor { col: cor_rgb(cor) });
-                    ops.push(retangulo(b.rect, altura_pt, PaintMode::Fill));
-                }
-                if b.border_width > 0.0 {
-                    if let Some(cor) = b.border_color {
-                        ops.push(Op::SetOutlineColor { col: cor_rgb(cor) });
-                        ops.push(Op::SetOutlineThickness { pt: Pt(pt(b.border_width)) });
-                        ops.push(retangulo(b.rect, altura_pt, PaintMode::Stroke));
-                    }
-                }
-            }
-
-            for img in &page.images {
-                if img.width_px == 0 || img.height_px == 0 || img.rgba.is_empty() {
-                    continue;
-                }
-                let chave = (
-                    img.width_px,
-                    img.height_px,
-                    std::sync::Arc::as_ptr(&img.rgba) as usize,
-                );
-                let id = cache_imagens.entry(chave).or_insert_with(|| {
-                    doc.add_image(&RawImage {
-                        pixels: RawImageData::U8(img.rgba.as_ref().clone()),
-                        width: img.width_px as usize,
-                        height: img.height_px as usize,
-                        data_format: RawImageFormat::RGBA8,
-                        tag: Vec::new(),
-                    })
-                });
-
-                // Com dpi = 72, o auto-escalonamento do UseXobject leva o bitmap
-                // a 1px = 1pt; scale_x/y ajustam daí para a caixa do layout.
-                ops.push(Op::UseXobject {
-                    id: id.clone(),
-                    transform: XObjectTransform {
-                        translate_x: Some(Pt(pt(img.rect.x))),
-                        translate_y: Some(Pt(altura_pt - pt(img.rect.y) - pt(img.rect.height))),
-                        scale_x: Some(pt(img.rect.width) / img.width_px as f32),
-                        scale_y: Some(pt(img.rect.height) / img.height_px as f32),
-                        rotate: None,
-                        dpi: Some(72.0),
-                        no_auto_scale: false,
-                    },
-                });
-            }
-
-            for run in &page.texts {
-                let Some(Some(font_id)) = ids.get(run.font_index) else {
-                    continue;
-                };
-                if run.glyphs.is_empty() {
-                    continue;
-                }
-                let handle = PdfFontHandle::External(font_id.clone());
-
-                ops.push(Op::StartTextSection);
-                ops.push(Op::SetFillColor { col: cor_rgb(run.color) });
-                ops.push(Op::SetFont { font: handle.clone(), size: Pt(pt(run.font_size_px)) });
-
-                // Um glifo por vez, cada um com sua própria matriz de texto: o
-                // shaping já deu a posição absoluta de cada glifo dentro do run,
-                // então não há avanço a recalcular aqui. PDF tem origem embaixo à
-                // esquerda; a display list, em cima à esquerda.
-                let mut chars = run.text.chars();
-                for g in &run.glyphs {
-                    let x = pt(run.origin_x + g.x);
-                    let y = altura_pt - pt(run.baseline_y + g.y);
-                    ops.push(Op::SetTextMatrix {
-                        matrix: TextMatrix::Translate(Pt(x), Pt(y)),
-                    });
-                    ops.push(Op::ShowText {
-                        items: vec![TextItem::GlyphIds(vec![Codepoint {
-                            gid: g.id,
-                            offset: 0.0,
-                            // Alimenta o ToUnicode para o texto sair selecionável.
-                            cid: chars.next().map(String::from),
-                        }])],
-                    });
-                }
-
-                ops.push(Op::EndTextSection);
-            }
-
-            PdfPage::new(
-                Mm(largura_pt / PT_POR_MM),
-                Mm(altura_pt / PT_POR_MM),
-                ops,
-            )
+            draw_boxes(&mut ops, page, height_pt);
+            draw_images(&mut ops, &mut doc, &mut image_cache, page, height_pt);
+            draw_text(&mut ops, page, &font_ids, height_pt);
+            PdfPage::new(Mm(width_pt / PT_PER_MM), Mm(height_pt / PT_PER_MM), ops)
         })
         .collect();
 
-    doc.with_pages(paginas);
-    let mut avisos = Vec::new();
-    doc.save(&PdfSaveOptions::default(), &mut avisos)
-}
-
-fn cor_rgb(c: [u8; 3]) -> Color {
-    Color::Rgb(Rgb {
-        r: c[0] as f32 / 255.0,
-        g: c[1] as f32 / 255.0,
-        b: c[2] as f32 / 255.0,
-        icc_profile: None,
-    })
-}
-
-fn retangulo(r: render_ir::Rect, altura_pt: f32, modo: PaintMode) -> Op {
-    let x = pt(r.x);
-    let y = altura_pt - pt(r.y) - pt(r.height);
-    Op::DrawPolygon {
-        polygon: Polygon {
-            rings: vec![PolygonRing {
-                points: vec![
-                    ponto(x, y),
-                    ponto(x + pt(r.width), y),
-                    ponto(x + pt(r.width), y + pt(r.height)),
-                    ponto(x, y + pt(r.height)),
-                ],
-            }],
-            mode: modo,
-            winding_order: WindingOrder::NonZero,
-        },
-    }
-}
-
-fn ponto(x: f32, y: f32) -> LinePoint {
-    LinePoint {
-        p: Point { x: Pt(x), y: Pt(y) },
-        bezier: false,
-    }
+    doc.with_pages(pdf_pages);
+    let mut warnings = Vec::new();
+    doc.save(&PdfSaveOptions::default(), &mut warnings)
 }
 
 #[cfg(test)]
@@ -186,27 +61,28 @@ mod tests {
     }
 
     #[test]
-    fn pdf_vazio_ainda_e_um_pdf_valido() {
+    fn an_empty_pdf_is_still_a_valid_pdf() {
         let bytes = render_pdf(&[Page::default()], &[], &geo());
-        assert!(bytes.starts_with(b"%PDF-"), "cabeçalho de PDF ausente");
-        assert!(bytes.windows(5).any(|w| w == b"%%EOF"), "trailer ausente");
+        assert!(bytes.starts_with(b"%PDF-"), "missing PDF header");
+        assert!(bytes.windows(5).any(|w| w == b"%%EOF"), "missing trailer");
     }
 
     #[test]
-    fn numero_de_paginas_no_pdf_bate_com_a_entrada() {
+    fn the_pdf_page_count_matches_the_input() {
         let bytes = render_pdf(
             &[Page::default(), Page::default(), Page::default()],
             &[],
             &geo(),
         );
-        let texto = String::from_utf8_lossy(&bytes);
-        // printpdf serializa sem espaço; "/Type/Page/" não casa com "/Type/Pages".
-        let ocorrencias = texto.matches("/Type/Page/").count();
-        assert!(ocorrencias >= 3, "esperava ao menos 3 páginas, veio {ocorrencias}");
+        let text = String::from_utf8_lossy(&bytes);
+        // printpdf serializes without a space; "/Type/Page/" does not match
+        // "/Type/Pages".
+        let count = text.matches("/Type/Page/").count();
+        assert!(count >= 3, "expected at least 3 pages, got {count}");
     }
 
     #[test]
-    fn texto_e_emitido_como_operador_de_texto_nao_como_imagem() {
+    fn text_is_emitted_as_a_text_operator_not_as_an_image() {
         let page = Page {
             boxes: vec![],
             images: vec![],
@@ -220,35 +96,36 @@ mod tests {
                 text: "A".into(),
             }],
         };
-        let fonte = render_ir::FontResource {
-            bytes: carregar_fonte_de_teste(),
+        let font = render_ir::FontResource {
+            bytes: load_test_font(),
             face_index: 0,
         };
-        let bytes = render_pdf(&[page], &[fonte], &geo());
-        let texto = String::from_utf8_lossy(&bytes);
+        let bytes = render_pdf(&[page], &[font], &geo());
+        let text = String::from_utf8_lossy(&bytes);
         assert!(
-            texto.contains("/FontFile2") || texto.contains("/FontFile3"),
-            "fonte não foi embutida"
+            text.contains("/FontFile2") || text.contains("/FontFile3"),
+            "the font was not embedded"
         );
-        assert!(!texto.contains("/Subtype /Image"), "texto virou bitmap");
+        assert!(!text.contains("/Subtype /Image"), "text became a bitmap");
     }
 
-    /// Usa uma fonte do próprio sistema para o teste não depender de fixture binária.
-    fn carregar_fonte_de_teste() -> Vec<u8> {
-        let candidatos = [
+    /// Uses a system font so the test needs no binary fixture.
+    fn load_test_font() -> Vec<u8> {
+        let candidates = [
             "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ];
-        for c in candidatos {
+        for c in candidates {
             if let Ok(b) = std::fs::read(c) {
                 return b;
             }
         }
-        panic!("nenhuma fonte de teste encontrada nos caminhos conhecidos");
+        panic!("no test font found in the known paths");
     }
+
     #[test]
-    fn imagem_vira_xobject_embutido_no_pdf() {
+    fn an_image_becomes_an_xobject_embedded_in_the_pdf() {
         let page = Page {
             boxes: vec![],
             texts: vec![],
@@ -256,20 +133,20 @@ mod tests {
                 rect: render_ir::Rect { x: 50.0, y: 20.0, width: 80.0, height: 40.0 },
                 width_px: 4,
                 height_px: 2,
-                // 4x2 RGBA opaco.
+                // 4x2 opaque RGBA.
                 rgba: std::sync::Arc::new(vec![200; 4 * 2 * 4]),
             }],
         };
         let bytes = render_pdf(&[page], &[], &geo());
-        let texto = String::from_utf8_lossy(&bytes);
-        assert!(texto.contains("/Subtype/Image") || texto.contains("/Subtype /Image"),
-            "a imagem não virou XObject");
-        assert!(texto.contains("/Width 4"), "largura do bitmap ausente");
-        assert!(texto.contains("/Height 2"), "altura do bitmap ausente");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/Subtype/Image") || text.contains("/Subtype /Image"),
+            "the image did not become an XObject");
+        assert!(text.contains("/Width 4"), "missing bitmap width");
+        assert!(text.contains("/Height 2"), "missing bitmap height");
     }
 
     #[test]
-    fn imagem_vazia_nao_derruba_a_emissao() {
+    fn an_empty_image_does_not_break_emission() {
         let page = Page {
             boxes: vec![],
             texts: vec![],

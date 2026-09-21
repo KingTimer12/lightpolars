@@ -1,5 +1,5 @@
-//! Tipos puros trocados entre render-core, paginate e pdf-out.
-//! Sem dependência de blitz ou printpdf — essa é a fronteira do desenho.
+//! Pure types exchanged between render-core, paginate, pdf-out and raster-out.
+//! No blitz or printpdf dependency — this is the drawing boundary.
 
 pub fn px_from_mm(mm: f32) -> f32 { mm * 96.0 / 25.4 }
 pub fn px_from_cm(cm: f32) -> f32 { cm * 96.0 / 2.54 }
@@ -17,7 +17,7 @@ impl Rect {
     pub fn bottom(&self) -> f32 { self.y + self.height }
 }
 
-/// Um glifo já posicionado pelo shaping, em px, relativo à origem do run.
+/// A glyph already placed by shaping, in px, relative to the run origin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Glyph {
     pub id: u16,
@@ -25,17 +25,17 @@ pub struct Glyph {
     pub y: f32,
 }
 
-/// Sequência de glifos de uma mesma fonte e tamanho, numa mesma linha.
+/// A sequence of glyphs sharing one font and size, on a single line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextRun {
     pub origin_x: f32,
     pub baseline_y: f32,
-    /// Índice em `DisplayList::fonts`.
+    /// Index into `DisplayList::fonts`.
     pub font_index: usize,
     pub font_size_px: f32,
     pub color: [u8; 3],
     pub glyphs: Vec<Glyph>,
-    /// Texto original do run, para o mapa ToUnicode do PDF.
+    /// Source text of the run, for the PDF ToUnicode map.
     pub text: String,
 }
 
@@ -47,19 +47,19 @@ pub struct BoxItem {
     pub border_width: f32,
 }
 
-/// Uma imagem já decodificada, posicionada pelo layout.
-/// Guarda RGBA8 porque é o que o blitz entrega e o que o PDF consome; o Arc
-/// existe para o corte em páginas não copiar o bitmap inteiro.
+/// A decoded image, placed by layout.
+/// Holds RGBA8 because that is what blitz produces and what the PDF consumes;
+/// the Arc keeps page slicing from copying the whole bitmap.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageItem {
     pub rect: Rect,
-    /// Largura e altura em pixels do bitmap, não da caixa onde ele é desenhado.
+    /// Size of the bitmap in pixels, not of the box it is drawn into.
     pub width_px: u32,
     pub height_px: u32,
     pub rgba: std::sync::Arc<Vec<u8>>,
 }
 
-/// Bytes de uma fonte usada pelo documento, com o índice da face no arquivo.
+/// Bytes of a font used by the document, with the face index inside the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontResource {
     pub bytes: Vec<u8>,
@@ -73,16 +73,17 @@ pub struct DisplayList {
     pub images: Vec<ImageItem>,
     pub fonts: Vec<FontResource>,
     pub width: f32,
-    /// Altura que o layout reservou para a raiz do documento, pintada ou não.
+    /// Height the layout reserved for the document root, painted or not.
     ///
-    /// Existe porque um elemento invisível (um `<div style="height:3000px">`
-    /// sem fundo) não emite item nenhum: só pelos itens desenhados o documento
-    /// pareceria ter altura zero, e o screenshot sairia recortado.
+    /// Needed because an invisible element (a `<div style="height:3000px">`
+    /// with no background) emits no item at all: judging by painted items
+    /// alone the document would look zero-height and a screenshot would come
+    /// out cropped.
     pub layout_height: f32,
 }
 
 impl DisplayList {
-    /// Altura ocupada pelo conteúdo. Base do corte de páginas.
+    /// Height occupied by the content. Basis for page slicing.
     pub fn content_height(&self) -> f32 {
         let from_boxes = self.boxes.iter().map(|b| b.rect.bottom());
         let from_texts = self.texts.iter().map(|t| t.baseline_y);
@@ -99,26 +100,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rect_bottom_e_soma_de_y_com_altura() {
+    fn rect_bottom_is_y_plus_height() {
         let r = Rect { x: 10.0, y: 20.0, width: 100.0, height: 30.0 };
         assert_eq!(r.bottom(), 50.0);
     }
 
     #[test]
-    fn conversoes_de_unidade_para_px_a_96dpi() {
+    fn unit_conversions_to_px_at_96dpi() {
         assert!((px_from_mm(25.4) - 96.0).abs() < 1e-6);
         assert!((px_from_cm(2.54) - 96.0).abs() < 1e-6);
         assert!((px_from_pt(72.0) - 96.0).abs() < 1e-6);
     }
 
     #[test]
-    fn display_list_vazia_tem_altura_zero() {
+    fn empty_display_list_has_zero_height() {
         let dl = DisplayList::default();
         assert_eq!(dl.content_height(), 0.0);
     }
 
     #[test]
-    fn content_height_e_o_maior_bottom_entre_itens() {
+    fn content_height_is_the_lowest_item_bottom() {
         let mut dl = DisplayList::default();
         dl.boxes.push(BoxItem {
             rect: Rect { x: 0.0, y: 0.0, width: 10.0, height: 40.0 },
@@ -139,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn content_height_conta_a_base_das_imagens() {
+    fn content_height_counts_image_bottoms() {
         let mut dl = DisplayList::default();
         dl.images.push(ImageItem {
             rect: Rect { x: 0.0, y: 10.0, width: 100.0, height: 150.0 },
@@ -151,13 +152,13 @@ mod tests {
     }
 
     #[test]
-    fn layout_height_conta_mesmo_sem_item_pintado() {
+    fn layout_height_counts_even_with_nothing_painted() {
         let dl = DisplayList { layout_height: 3000.0, ..Default::default() };
         assert_eq!(dl.content_height(), 3000.0);
     }
 
     #[test]
-    fn item_mais_baixo_que_o_layout_ainda_vence() {
+    fn an_item_below_the_layout_box_still_wins() {
         let mut dl = DisplayList { layout_height: 100.0, ..Default::default() };
         dl.boxes.push(BoxItem {
             rect: Rect { x: 0.0, y: 0.0, width: 10.0, height: 500.0 },
