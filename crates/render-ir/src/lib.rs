@@ -15,6 +15,7 @@ pub struct Rect {
 
 impl Rect {
     pub fn bottom(&self) -> f32 { self.y + self.height }
+    pub fn right(&self) -> f32 { self.x + self.width }
 }
 
 /// A glyph already placed by shaping, in px, relative to the run origin.

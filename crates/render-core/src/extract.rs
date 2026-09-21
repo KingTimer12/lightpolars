@@ -133,6 +133,12 @@ fn layout_and_extract(
                     border_width,
                 });
             }
+
+            // `background-image` layers paint over the background color and
+            // under the element's own content, which is the order the display
+            // list already has: boxes first, then images.
+            dl.images
+                .extend(crate::background::extract(el, s, node_box));
         }
 
         if let Some(image) = extract_image(el, node_box) {

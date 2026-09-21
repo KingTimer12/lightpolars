@@ -1,3 +1,4 @@
+pub mod background;
 pub mod extract;
 pub mod net;
 pub mod resource;
