@@ -15,5 +15,5 @@ mod slicer;
 pub use capture::{clip, whole_document};
 pub use fonts::merge_fonts;
 pub use geometry::{A4_HEIGHT_PX, A4_WIDTH_PX, Margins, PageGeometry};
-pub use page::Page;
+pub use page::{Page, Painted};
 pub use slicer::paginate;

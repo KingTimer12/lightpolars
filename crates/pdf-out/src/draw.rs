@@ -4,7 +4,7 @@
 //! every y here is mirrored against the sheet height.
 
 use crate::pt;
-use paginate::Page;
+use paginate::{Page, Painted};
 use printpdf::*;
 use std::collections::HashMap;
 
@@ -16,63 +16,75 @@ type ImageKey = (u32, u32, usize);
 #[derive(Default)]
 pub struct ImageCache(HashMap<ImageKey, XObjectId>);
 
-pub fn draw_boxes(ops: &mut Vec<Op>, page: &Page, height_pt: f32) {
-    for b in &page.boxes {
-        if let Some(color) = b.background {
-            ops.push(Op::SetFillColor { col: rgb_color(color) });
-            ops.push(rect_op(b.rect, height_pt, PaintMode::Fill));
-        }
-        if b.border_width > 0.0
-            && let Some(color) = b.border_color
-        {
-            ops.push(Op::SetOutlineColor { col: rgb_color(color) });
-            ops.push(Op::SetOutlineThickness { pt: Pt(pt(b.border_width)) });
-            ops.push(rect_op(b.rect, height_pt, PaintMode::Stroke));
-        }
-    }
-}
-
-pub fn draw_images(
+/// Boxes and bitmaps, in document paint order — see `paginate::Page::painted`.
+pub fn draw_background(
     ops: &mut Vec<Op>,
     doc: &mut PdfDocument,
     cache: &mut ImageCache,
     page: &Page,
     height_pt: f32,
 ) {
-    for img in &page.images {
-        if img.width_px == 0 || img.height_px == 0 || img.rgba.is_empty() {
-            continue;
+    for item in page.painted() {
+        match item {
+            Painted::Box(b) => draw_box(ops, b, height_pt),
+            Painted::Image(img) => draw_image(ops, doc, cache, img, height_pt),
         }
-        let key = (
-            img.width_px,
-            img.height_px,
-            std::sync::Arc::as_ptr(&img.rgba) as usize,
-        );
-        let id = cache.0.entry(key).or_insert_with(|| {
-            doc.add_image(&RawImage {
-                pixels: RawImageData::U8(img.rgba.as_ref().clone()),
-                width: img.width_px as usize,
-                height: img.height_px as usize,
-                data_format: RawImageFormat::RGBA8,
-                tag: Vec::new(),
-            })
-        });
-
-        // At dpi = 72 the UseXobject auto-scaling puts the bitmap at 1px = 1pt;
-        // scale_x/y take it from there to the layout box.
-        ops.push(Op::UseXobject {
-            id: id.clone(),
-            transform: XObjectTransform {
-                translate_x: Some(Pt(pt(img.rect.x))),
-                translate_y: Some(Pt(height_pt - pt(img.rect.y) - pt(img.rect.height))),
-                scale_x: Some(pt(img.rect.width) / img.width_px as f32),
-                scale_y: Some(pt(img.rect.height) / img.height_px as f32),
-                rotate: None,
-                dpi: Some(72.0),
-                no_auto_scale: false,
-            },
-        });
     }
+}
+
+fn draw_box(ops: &mut Vec<Op>, b: &render_ir::BoxItem, height_pt: f32) {
+    if let Some(color) = b.background {
+        ops.push(Op::SetFillColor { col: rgb_color(color) });
+        ops.push(rect_op(b.rect, height_pt, PaintMode::Fill));
+    }
+    if b.border_width > 0.0
+        && let Some(color) = b.border_color
+    {
+        ops.push(Op::SetOutlineColor { col: rgb_color(color) });
+        ops.push(Op::SetOutlineThickness { pt: Pt(pt(b.border_width)) });
+        ops.push(rect_op(b.rect, height_pt, PaintMode::Stroke));
+    }
+}
+
+fn draw_image(
+    ops: &mut Vec<Op>,
+    doc: &mut PdfDocument,
+    cache: &mut ImageCache,
+    img: &render_ir::ImageItem,
+    height_pt: f32,
+) {
+    if img.width_px == 0 || img.height_px == 0 || img.rgba.is_empty() {
+        return;
+    }
+    let key = (
+        img.width_px,
+        img.height_px,
+        std::sync::Arc::as_ptr(&img.rgba) as usize,
+    );
+    let id = cache.0.entry(key).or_insert_with(|| {
+        doc.add_image(&RawImage {
+            pixels: RawImageData::U8(img.rgba.as_ref().clone()),
+            width: img.width_px as usize,
+            height: img.height_px as usize,
+            data_format: RawImageFormat::RGBA8,
+            tag: Vec::new(),
+        })
+    });
+
+    // At dpi = 72 the UseXobject auto-scaling puts the bitmap at 1px = 1pt;
+    // scale_x/y take it from there to the layout box.
+    ops.push(Op::UseXobject {
+        id: id.clone(),
+        transform: XObjectTransform {
+            translate_x: Some(Pt(pt(img.rect.x))),
+            translate_y: Some(Pt(height_pt - pt(img.rect.y) - pt(img.rect.height))),
+            scale_x: Some(pt(img.rect.width) / img.width_px as f32),
+            scale_y: Some(pt(img.rect.height) / img.height_px as f32),
+            rotate: None,
+            dpi: Some(72.0),
+            no_auto_scale: false,
+        },
+    });
 }
 
 pub fn draw_text(ops: &mut Vec<Op>, page: &Page, font_ids: &[Option<FontId>], height_pt: f32) {

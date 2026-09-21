@@ -26,6 +26,7 @@ fn box_page(rect: Rect, background: [u8; 3]) -> Page {
             background: Some(background),
             border_color: None,
             border_width: 0.0,
+            order: 0,
         }],
         ..Default::default()
     }
@@ -38,6 +39,7 @@ fn image_page(rect: Rect, width_px: u32, height_px: u32, rgba: Vec<u8>) -> Page 
             width_px,
             height_px,
             rgba: Arc::new(rgba),
+            order: 0,
         }],
         ..Default::default()
     }

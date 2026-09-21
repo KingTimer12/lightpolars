@@ -3,7 +3,7 @@
 
 mod draw;
 
-use draw::{ImageCache, draw_boxes, draw_images, draw_text};
+use draw::{ImageCache, draw_background, draw_text};
 use paginate::{Page, PageGeometry};
 use printpdf::*;
 use render_ir::FontResource;
@@ -38,8 +38,7 @@ pub fn render_pdf(pages: &[Page], fonts: &[FontResource], geo: &PageGeometry) ->
         .iter()
         .map(|page| {
             let mut ops = Vec::new();
-            draw_boxes(&mut ops, page, height_pt);
-            draw_images(&mut ops, &mut doc, &mut image_cache, page, height_pt);
+            draw_background(&mut ops, &mut doc, &mut image_cache, page, height_pt);
             draw_text(&mut ops, page, &font_ids, height_pt);
             PdfPage::new(Mm(width_pt / PT_PER_MM), Mm(height_pt / PT_PER_MM), ops)
         })
@@ -135,6 +134,7 @@ mod tests {
                 height_px: 2,
                 // 4x2 opaque RGBA.
                 rgba: std::sync::Arc::new(vec![200; 4 * 2 * 4]),
+                order: 0,
             }],
         };
         let bytes = render_pdf(&[page], &[], &geo());
@@ -155,6 +155,7 @@ mod tests {
                 width_px: 0,
                 height_px: 0,
                 rgba: std::sync::Arc::new(vec![]),
+                order: 0,
             }],
         };
         let bytes = render_pdf(&[page], &[], &geo());

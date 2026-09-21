@@ -2,3 +2,4 @@
 
 # workspace de execução do SDD (scratch, não versionar)
 .superpowers/
+.ref/

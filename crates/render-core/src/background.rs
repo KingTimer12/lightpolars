@@ -30,7 +30,12 @@ const MAX_TILES: i64 = 16_384;
 
 /// The image items for every background layer of one element, already in paint
 /// order.
-pub fn extract(el: &ElementData, style: &ComputedValues, node_box: Rect) -> Vec<ImageItem> {
+pub fn extract(
+    el: &ElementData,
+    style: &ComputedValues,
+    node_box: Rect,
+    order: &mut crate::extract::PaintOrder,
+) -> Vec<ImageItem> {
     if node_box.width <= 0.0 || node_box.height <= 0.0 || el.background_images.is_empty() {
         return Vec::new();
     }
@@ -40,7 +45,7 @@ pub fn extract(el: &ElementData, style: &ComputedValues, node_box: Rect) -> Vec<
     // the layers are walked from the last one to the first.
     for (index, layer) in el.background_images.iter().enumerate().rev() {
         let Some(layer) = layer.as_ref() else { continue };
-        extract_layer(layer, style, index, node_box, &mut items);
+        extract_layer(layer, style, index, node_box, order, &mut items);
     }
     items
 }
@@ -50,6 +55,7 @@ fn extract_layer(
     style: &ComputedValues,
     index: usize,
     area: Rect,
+    order: &mut crate::extract::PaintOrder,
     out: &mut Vec<ImageItem>,
 ) {
     let Some((intrinsic_width, intrinsic_height)) = intrinsic_size(&layer.image) else {
@@ -98,7 +104,7 @@ fn extract_layer(
                 width: tile_width,
                 height: tile_height,
             };
-            if let Some(item) = crop_to(&source, tile, area) {
+            if let Some(item) = crop_to(&source, tile, area, order.take()) {
                 out.push(item);
             }
         }
@@ -218,7 +224,7 @@ struct Source {
 /// Clips a tile to the element box, cropping the pixels rather than asking the
 /// renderer for a clip path. Returns `None` when nothing of the tile is
 /// visible.
-fn crop_to(source: &Source, tile: Rect, area: Rect) -> Option<ImageItem> {
+fn crop_to(source: &Source, tile: Rect, area: Rect, order: u32) -> Option<ImageItem> {
     let expected = source.width as usize * source.height as usize * 4;
     if source.rgba.len() != expected || expected == 0 {
         return None;
@@ -248,23 +254,33 @@ fn crop_to(source: &Source, tile: Rect, area: Rect) -> Option<ImageItem> {
             width_px: source.width,
             height_px: source.height,
             rgba: source.rgba.clone(),
+            order,
         });
     }
 
     // Map the visible rect back to source pixels. The tile scales uniformly,
     // so the mapping is linear on each axis.
+    //
+    // Both edges are mapped and then rounded outwards. Mapping the *width*
+    // instead would be wrong whenever the visible span straddles a pixel
+    // boundary: 1080 of a 2700px tile backed by a 2px image is 0.8 source px,
+    // which rounds to one pixel, while the span really covers source 0.6..1.4
+    // and needs two.
     let to_px = |offset: f32, tile_side: f32, source_side: u32| -> f32 {
         offset / tile_side * source_side as f32
     };
-    let left = to_px(visible.x - tile.x, tile.width, source.width).floor().max(0.0) as u32;
-    let top = to_px(visible.y - tile.y, tile.height, source.height).floor().max(0.0) as u32;
-    let crop_width =
-        (to_px(visible.width, tile.width, source.width).ceil() as u32).min(source.width - left);
-    let crop_height =
-        (to_px(visible.height, tile.height, source.height).ceil() as u32).min(source.height - top);
-    if crop_width == 0 || crop_height == 0 {
-        return None;
-    }
+    let left = to_px(visible.x - tile.x, tile.width, source.width)
+        .floor()
+        .clamp(0.0, source.width as f32 - 1.0) as u32;
+    let top = to_px(visible.y - tile.y, tile.height, source.height)
+        .floor()
+        .clamp(0.0, source.height as f32 - 1.0) as u32;
+    let right_px = (to_px(right - tile.x, tile.width, source.width).ceil() as u32)
+        .clamp(left + 1, source.width);
+    let bottom_px = (to_px(bottom - tile.y, tile.height, source.height).ceil() as u32)
+        .clamp(top + 1, source.height);
+    let crop_width = right_px - left;
+    let crop_height = bottom_px - top;
 
     let mut rgba = Vec::with_capacity(crop_width as usize * crop_height as usize * 4);
     for row in 0..crop_height {
@@ -282,8 +298,8 @@ fn crop_to(source: &Source, tile: Rect, area: Rect) -> Option<ImageItem> {
     let scale_y = tile.height / source.height as f32;
     let x = (tile.x + left as f32 * scale_x).max(area.x);
     let y = (tile.y + top as f32 * scale_y).max(area.y);
-    let right = (tile.x + (left + crop_width) as f32 * scale_x).min(area.right());
-    let bottom = (tile.y + (top + crop_height) as f32 * scale_y).min(area.bottom());
+    let right = (tile.x + right_px as f32 * scale_x).min(area.right());
+    let bottom = (tile.y + bottom_px as f32 * scale_y).min(area.bottom());
     if right <= x || bottom <= y {
         return None;
     }
@@ -297,6 +313,7 @@ fn crop_to(source: &Source, tile: Rect, area: Rect) -> Option<ImageItem> {
         width_px: crop_width,
         height_px: crop_height,
         rgba: Arc::new(rgba),
+        order,
     })
 }
 
@@ -415,6 +432,41 @@ mod tests {
         ));
         assert_eq!(dl.images.len(), 1, "SVG background not painted");
         assert!(dl.images[0].width_px > 10, "not rasterized at the tile size");
+    }
+
+    #[test]
+    fn an_ancestor_background_paints_before_a_descendant_box() {
+        // The bug this guards: drawing every box and then every image put a
+        // full-page background over the whole document.
+        let html = format!(
+            "<!DOCTYPE html><html><head><style>body{{margin:0}}</style></head><body>\
+             <div style='width:100px;height:100px;background-image:url({STRIPE});\
+             background-size:cover;background-repeat:no-repeat'>\
+             <div style='width:10px;height:10px;background:#0f0'></div></div></body></html>"
+        );
+        let dl = render_html(&html, 200.0);
+        let wave = dl.images.iter().map(|i| i.order).min().expect("no background");
+        let child = dl
+            .boxes
+            .iter()
+            .find(|b| b.background == Some([0, 255, 0]))
+            .expect("no child box")
+            .order;
+        assert!(wave < child, "background {wave} must paint before the box {child}");
+    }
+
+    #[test]
+    fn cover_spans_the_whole_box_even_from_a_tiny_source() {
+        // 2x1 covering 1080x1350: the crop has to round outwards on both
+        // edges, otherwise the tile comes out half width.
+        let html = format!(
+            "<!DOCTYPE html><html><head><style>body{{margin:0}}</style></head><body>\
+             <div style='width:1080px;height:1350px;background-image:url({STRIPE});\
+             background-size:cover;background-repeat:no-repeat'></div></body></html>"
+        );
+        let dl = render_html(&html, 1080.0);
+        let rect = dl.images[0].rect;
+        assert!((rect.width - 1080.0).abs() < 0.5, "did not span the box: {rect:?}");
     }
 
     #[test]

@@ -49,6 +49,7 @@ mod tests {
                 background: Some([1, 2, 3]),
                 border_color: None,
                 border_width: 0.0,
+                order: 0,
             }],
             ..Default::default()
         }

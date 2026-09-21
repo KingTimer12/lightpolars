@@ -47,8 +47,7 @@ pub fn render_pixmap(
         BACKGROUND[3],
     ));
 
-    canvas::draw_boxes(&mut pixmap, page, scale);
-    canvas::draw_images(&mut pixmap, page, scale);
+    canvas::draw_background(&mut pixmap, page, scale);
     text::draw_texts(&mut pixmap, page, fonts, scale);
 
     Some(pixmap)

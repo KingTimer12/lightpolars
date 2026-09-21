@@ -1,29 +1,29 @@
 //! Painting boxes and bitmaps onto the pixmap.
 
 use crate::premultiply;
-use paginate::Page;
+use paginate::{Page, Painted};
 use render_ir::{ImageItem, Rect};
 use tiny_skia::{
     FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PremultipliedColorU8,
     Rect as SkRect, SpreadMode, Stroke, Transform,
 };
 
-pub fn draw_boxes(pixmap: &mut Pixmap, page: &Page, scale: f32) {
-    for b in &page.boxes {
-        if let Some(c) = b.background {
-            fill_rect(pixmap, b.rect, scale, opaque(c));
+/// Boxes and bitmaps, in document paint order — see `paginate::Page::painted`.
+pub fn draw_background(pixmap: &mut Pixmap, page: &Page, scale: f32) {
+    for item in page.painted() {
+        match item {
+            Painted::Box(b) => {
+                if let Some(c) = b.background {
+                    fill_rect(pixmap, b.rect, scale, opaque(c));
+                }
+                if b.border_width > 0.0
+                    && let Some(c) = b.border_color
+                {
+                    stroke_rect(pixmap, b.rect, b.border_width, scale, opaque(c));
+                }
+            }
+            Painted::Image(img) => draw_image(pixmap, img, scale),
         }
-        if b.border_width > 0.0
-            && let Some(c) = b.border_color
-        {
-            stroke_rect(pixmap, b.rect, b.border_width, scale, opaque(c));
-        }
-    }
-}
-
-pub fn draw_images(pixmap: &mut Pixmap, page: &Page, scale: f32) {
-    for img in &page.images {
-        draw_image(pixmap, img, scale);
     }
 }
 

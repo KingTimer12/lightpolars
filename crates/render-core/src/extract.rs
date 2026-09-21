@@ -79,6 +79,13 @@ fn layout_and_extract(
         1.0,
         ColorScheme::Light,
     ));
+    // blitz never fetches an @font-face declared in an inline <style>, so the
+    // faces are registered by hand before the first layout (see fonts.rs).
+    for bytes in crate::fonts::inline_font_faces(html) {
+        doc.load_resource(blitz_dom::net::Resource::Font(
+            blitz_traits::net::Bytes::from(bytes),
+        ));
+    }
     doc.resolve(0.0);
 
     // Images only exist once the resource enters the document, and that
@@ -97,6 +104,9 @@ fn layout_and_extract(
         ..Default::default()
     };
     let mut fonts: Vec<FontResource> = Vec::new();
+    // Document paint order, shared by boxes and images so the renderers can
+    // interleave them (see `render_ir::ImageItem::order`).
+    let mut order = PaintOrder::default();
 
     let tree = doc.tree();
 
@@ -131,17 +141,17 @@ fn layout_and_extract(
                     background,
                     border_color,
                     border_width,
+                    order: order.take(),
                 });
             }
 
-            // `background-image` layers paint over the background color and
-            // under the element's own content, which is the order the display
-            // list already has: boxes first, then images.
+            // `background-image` layers paint over the background colour of
+            // the same element and under its content.
             dl.images
-                .extend(crate::background::extract(el, s, node_box));
+                .extend(crate::background::extract(el, s, node_box, &mut order));
         }
 
-        if let Some(image) = extract_image(el, node_box) {
+        if let Some(image) = extract_image(el, node_box, order.take()) {
             dl.images.push(image);
         }
 
@@ -218,13 +228,18 @@ fn layout_and_extract(
 }
 
 /// The image drawn by this element, raster or SVG, already sized to its box.
-fn extract_image(el: &blitz_dom::node::ElementData, node_box: Rect) -> Option<ImageItem> {
+fn extract_image(
+    el: &blitz_dom::node::ElementData,
+    node_box: Rect,
+    order: u32,
+) -> Option<ImageItem> {
     if let Some(raster) = el.raster_image_data() {
         return Some(ImageItem {
             rect: node_box,
             width_px: raster.width,
             height_px: raster.height,
             rgba: raster.data.clone(),
+            order,
         });
     }
 
@@ -237,7 +252,20 @@ fn extract_image(el: &blitz_dom::node::ElementData, node_box: Rect) -> Option<Im
         width_px: width,
         height_px: height,
         rgba: Arc::new(rgba),
+        order,
     })
+}
+
+/// Hands out the paint-order numbers, in traversal order.
+#[derive(Default)]
+pub struct PaintOrder(u32);
+
+impl PaintOrder {
+    pub fn take(&mut self) -> u32 {
+        let current = self.0;
+        self.0 += 1;
+        current
+    }
 }
 
 /// Stores the font once and returns its index in `DisplayList::fonts`.

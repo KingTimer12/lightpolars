@@ -1,5 +1,6 @@
 pub mod background;
 pub mod extract;
+pub mod fonts;
 pub mod net;
 pub mod resource;
 pub mod style;

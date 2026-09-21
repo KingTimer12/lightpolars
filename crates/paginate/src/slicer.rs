@@ -209,6 +209,7 @@ mod tests {
             background: None,
             border_color: Some([0, 0, 0]),
             border_width: 1.0,
+            order: 0,
         });
         let pages = paginate(&dl, None, None, &geo);
         assert_eq!(pages.len(), 2);
@@ -271,6 +272,7 @@ mod tests {
             width_px: 10,
             height_px: 10,
             rgba: std::sync::Arc::new(vec![0; 10 * 10 * 4]),
+            order: 0,
         }
     }
 

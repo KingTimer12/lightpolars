@@ -40,24 +40,34 @@ pub struct TextRun {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct BoxItem {
     pub rect: Rect,
     pub background: Option<[u8; 3]>,
     pub border_color: Option<[u8; 3]>,
     pub border_width: f32,
+    /// Position of this item in document paint order. See `ImageItem::order`.
+    pub order: u32,
 }
 
 /// A decoded image, placed by layout.
 /// Holds RGBA8 because that is what blitz produces and what the PDF consumes;
 /// the Arc keeps page slicing from copying the whole bitmap.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ImageItem {
     pub rect: Rect,
     /// Size of the bitmap in pixels, not of the box it is drawn into.
     pub width_px: u32,
     pub height_px: u32,
     pub rgba: std::sync::Arc<Vec<u8>>,
+    /// Position of this item in document paint order.
+    ///
+    /// Boxes and images live in separate vectors, but they interleave on the
+    /// page: a `background-image` on an ancestor is painted before a
+    /// descendant's background colour. Drawing every box and then every image
+    /// puts a full-page background over the whole document. Renderers merge
+    /// the two lists by this number instead.
+    pub order: u32,
 }
 
 /// Bytes of a font used by the document, with the face index inside the file.
@@ -127,6 +137,7 @@ mod tests {
             background: None,
             border_color: None,
             border_width: 0.0,
+            order: 0,
         });
         dl.texts.push(TextRun {
             origin_x: 0.0,
@@ -148,6 +159,7 @@ mod tests {
             width_px: 200,
             height_px: 150,
             rgba: std::sync::Arc::new(vec![0; 200 * 150 * 4]),
+            order: 0,
         });
         assert_eq!(dl.content_height(), 160.0);
     }
@@ -166,6 +178,7 @@ mod tests {
             background: None,
             border_color: None,
             border_width: 0.0,
+            order: 0,
         });
         assert_eq!(dl.content_height(), 500.0);
     }
