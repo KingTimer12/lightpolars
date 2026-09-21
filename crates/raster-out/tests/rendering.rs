@@ -26,6 +26,7 @@ fn box_page(rect: Rect, background: [u8; 3]) -> Page {
             background: Some(background),
             border_color: None,
             border_width: 0.0,
+            radii: [[0.0; 2]; 4],
             order: 0,
         }],
         ..Default::default()
@@ -162,4 +163,25 @@ fn the_generated_jpeg_has_a_valid_marker() {
 fn an_out_of_range_quality_does_not_panic() {
     assert!(render_jpeg(&Page::default(), &[], &geo(10.0, 10.0), 1.0, 0).is_some());
     assert!(render_jpeg(&Page::default(), &[], &geo(10.0, 10.0), 1.0, 255).is_some());
+}
+
+#[test]
+fn a_rounded_box_leaves_its_corners_unpainted() {
+    let mut page = box_page(
+        Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 },
+        [255, 0, 0],
+    );
+    page.boxes[0].radii = [[20.0, 20.0]; 4];
+    let p = render_pixmap(&page, &[], &geo(40.0, 40.0), 1.0).unwrap();
+    assert_eq!(pixel(&p, 20, 20), [255, 0, 0, 255], "the middle is filled");
+    assert_eq!(pixel(&p, 0, 0), [255, 255, 255, 255], "the corner is cut away");
+    assert_eq!(pixel(&p, 39, 39), [255, 255, 255, 255], "so is the opposite one");
+    assert_eq!(pixel(&p, 20, 1), [255, 0, 0, 255], "the top edge stays");
+}
+
+#[test]
+fn a_square_box_keeps_its_corners() {
+    let page = box_page(Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 }, [255, 0, 0]);
+    let p = render_pixmap(&page, &[], &geo(40.0, 40.0), 1.0).unwrap();
+    assert_eq!(pixel(&p, 0, 0), [255, 0, 0, 255]);
 }

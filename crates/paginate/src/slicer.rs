@@ -209,6 +209,7 @@ mod tests {
             background: None,
             border_color: Some([0, 0, 0]),
             border_width: 1.0,
+            radii: [[0.0; 2]; 4],
             order: 0,
         });
         let pages = paginate(&dl, None, None, &geo);

@@ -11,7 +11,7 @@
 //! this.
 
 use crate::net::{DataUriProvider, ResourceCollector};
-use crate::style::{background_color, box_border, brush_color};
+use crate::style::{background_color, box_border, brush_color, corner_radii};
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -141,6 +141,7 @@ fn layout_and_extract(
                     background,
                     border_color,
                     border_width,
+                    radii: corner_radii(s, node_box.width, node_box.height),
                     order: order.take(),
                 });
             }

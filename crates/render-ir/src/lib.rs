@@ -46,8 +46,79 @@ pub struct BoxItem {
     pub background: Option<[u8; 3]>,
     pub border_color: Option<[u8; 3]>,
     pub border_width: f32,
+    /// `border-radius`, clockwise from the top-left corner, each corner as
+    /// `[horizontal, vertical]`. CSS radii are elliptical: `border-radius:50%`
+    /// on a 200x100 box is a 100x50 quarter-ellipse, not a circle.
+    pub radii: [[f32; 2]; 4],
     /// Position of this item in document paint order. See `ImageItem::order`.
     pub order: u32,
+}
+
+/// One step of a box outline, in display-list coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathCmd {
+    MoveTo([f32; 2]),
+    LineTo([f32; 2]),
+    /// Cubic bezier: two control points then the end point.
+    CurveTo([f32; 2], [f32; 2], [f32; 2]),
+}
+
+/// Distance from a corner to the bezier handle that approximates a quarter
+/// circle. The classic value; the error is under 0.03% of the radius.
+const KAPPA: f32 = 0.552_284_8;
+
+impl BoxItem {
+    pub fn has_radius(&self) -> bool {
+        self.radii.iter().any(|[x, y]| *x > 0.0 || *y > 0.0)
+    }
+
+    /// The outline as a closed path, clockwise from the top-left corner.
+    ///
+    /// Both renderers build their own path type from this, so the corner
+    /// geometry is defined once instead of twice.
+    pub fn outline(&self) -> Vec<PathCmd> {
+        let (l, t) = (self.rect.x, self.rect.y);
+        let (r, b) = (self.rect.right(), self.rect.bottom());
+        let [tl, tr, br, bl] = self.radii;
+
+        if !self.has_radius() {
+            return vec![
+                PathCmd::MoveTo([l, t]),
+                PathCmd::LineTo([r, t]),
+                PathCmd::LineTo([r, b]),
+                PathCmd::LineTo([l, b]),
+                PathCmd::LineTo([l, t]),
+            ];
+        }
+
+        vec![
+            PathCmd::MoveTo([l + tl[0], t]),
+            PathCmd::LineTo([r - tr[0], t]),
+            PathCmd::CurveTo(
+                [r - tr[0] + KAPPA * tr[0], t],
+                [r, t + tr[1] - KAPPA * tr[1]],
+                [r, t + tr[1]],
+            ),
+            PathCmd::LineTo([r, b - br[1]]),
+            PathCmd::CurveTo(
+                [r, b - br[1] + KAPPA * br[1]],
+                [r - br[0] + KAPPA * br[0], b],
+                [r - br[0], b],
+            ),
+            PathCmd::LineTo([l + bl[0], b]),
+            PathCmd::CurveTo(
+                [l + bl[0] - KAPPA * bl[0], b],
+                [l, b - bl[1] + KAPPA * bl[1]],
+                [l, b - bl[1]],
+            ),
+            PathCmd::LineTo([l, t + tl[1]]),
+            PathCmd::CurveTo(
+                [l, t + tl[1] - KAPPA * tl[1]],
+                [l + tl[0] - KAPPA * tl[0], t],
+                [l + tl[0], t],
+            ),
+        ]
+    }
 }
 
 /// A decoded image, placed by layout.
@@ -117,6 +188,63 @@ mod tests {
     }
 
     #[test]
+    fn a_box_without_radii_outlines_as_a_rectangle() {
+        let b = BoxItem {
+            rect: Rect { x: 0.0, y: 0.0, width: 10.0, height: 20.0 },
+            ..Default::default()
+        };
+        assert!(!b.has_radius());
+        assert_eq!(b.outline().len(), 5, "move plus four lines");
+        assert!(!b.outline().iter().any(|c| matches!(c, PathCmd::CurveTo(..))));
+    }
+
+    #[test]
+    fn a_rounded_box_outlines_with_one_curve_per_corner() {
+        let b = BoxItem {
+            rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+            radii: [[10.0, 10.0]; 4],
+            ..Default::default()
+        };
+        assert!(b.has_radius());
+        let curves = b.outline().iter().filter(|c| matches!(c, PathCmd::CurveTo(..))).count();
+        assert_eq!(curves, 4);
+    }
+
+    #[test]
+    fn the_outline_starts_and_ends_at_the_same_point() {
+        let b = BoxItem {
+            rect: Rect { x: 5.0, y: 7.0, width: 60.0, height: 40.0 },
+            radii: [[8.0, 6.0], [4.0, 4.0], [12.0, 3.0], [0.0, 0.0]],
+            ..Default::default()
+        };
+        let path = b.outline();
+        let PathCmd::MoveTo(start) = path[0] else { panic!("no move") };
+        let end = match path[path.len() - 1] {
+            PathCmd::CurveTo(_, _, p) | PathCmd::LineTo(p) | PathCmd::MoveTo(p) => p,
+        };
+        assert_eq!(start, end, "the path does not close");
+    }
+
+    #[test]
+    fn every_outline_point_stays_inside_the_box() {
+        let b = BoxItem {
+            rect: Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 },
+            radii: [[25.0, 25.0]; 4],
+            ..Default::default()
+        };
+        for cmd in b.outline() {
+            let points = match cmd {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => vec![p],
+                PathCmd::CurveTo(a, b2, c) => vec![a, b2, c],
+            };
+            for [x, y] in points {
+                assert!((10.0..=110.0).contains(&x), "x out of the box: {x}");
+                assert!((20.0..=70.0).contains(&y), "y out of the box: {y}");
+            }
+        }
+    }
+
+    #[test]
     fn unit_conversions_to_px_at_96dpi() {
         assert!((px_from_mm(25.4) - 96.0).abs() < 1e-6);
         assert!((px_from_cm(2.54) - 96.0).abs() < 1e-6);
@@ -137,6 +265,7 @@ mod tests {
             background: None,
             border_color: None,
             border_width: 0.0,
+            radii: [[0.0; 2]; 4],
             order: 0,
         });
         dl.texts.push(TextRun {
@@ -178,6 +307,7 @@ mod tests {
             background: None,
             border_color: None,
             border_width: 0.0,
+            radii: [[0.0; 2]; 4],
             order: 0,
         });
         assert_eq!(dl.content_height(), 500.0);

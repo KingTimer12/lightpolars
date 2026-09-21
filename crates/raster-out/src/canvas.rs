@@ -2,7 +2,7 @@
 
 use crate::premultiply;
 use paginate::{Page, Painted};
-use render_ir::{ImageItem, Rect};
+use render_ir::{BoxItem, ImageItem, PathCmd, Rect};
 use tiny_skia::{
     FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PremultipliedColorU8,
     Rect as SkRect, SpreadMode, Stroke, Transform,
@@ -12,19 +12,68 @@ use tiny_skia::{
 pub fn draw_background(pixmap: &mut Pixmap, page: &Page, scale: f32) {
     for item in page.painted() {
         match item {
-            Painted::Box(b) => {
-                if let Some(c) = b.background {
-                    fill_rect(pixmap, b.rect, scale, opaque(c));
-                }
-                if b.border_width > 0.0
-                    && let Some(c) = b.border_color
-                {
-                    stroke_rect(pixmap, b.rect, b.border_width, scale, opaque(c));
-                }
-            }
+            Painted::Box(b) => draw_box(pixmap, b, scale),
             Painted::Image(img) => draw_image(pixmap, img, scale),
         }
     }
+}
+
+fn draw_box(pixmap: &mut Pixmap, b: &BoxItem, scale: f32) {
+    // A square box goes through the rect helpers: they are cheaper and, for a
+    // hairline border, land on the pixel grid the same way every time.
+    if !b.has_radius() {
+        if let Some(c) = b.background {
+            fill_rect(pixmap, b.rect, scale, opaque(c));
+        }
+        if b.border_width > 0.0
+            && let Some(c) = b.border_color
+        {
+            stroke_rect(pixmap, b.rect, b.border_width, scale, opaque(c));
+        }
+        return;
+    }
+
+    let Some(path) = outline_path(b, scale) else {
+        return;
+    };
+    if let Some(c) = b.background {
+        let mut paint = Paint::default();
+        paint.set_color(opaque(c));
+        paint.anti_alias = true;
+        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+    if b.border_width > 0.0
+        && let Some(c) = b.border_color
+    {
+        let mut paint = Paint::default();
+        paint.set_color(opaque(c));
+        paint.anti_alias = true;
+        let stroke = Stroke { width: (b.border_width * scale).max(0.1), ..Default::default() };
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+fn outline_path(b: &BoxItem, scale: f32) -> Option<tiny_skia::Path> {
+    let mut builder = PathBuilder::new();
+    let at = |p: [f32; 2]| (p[0] * scale, p[1] * scale);
+    for cmd in b.outline() {
+        match cmd {
+            PathCmd::MoveTo(p) => {
+                let (x, y) = at(p);
+                builder.move_to(x, y);
+            }
+            PathCmd::LineTo(p) => {
+                let (x, y) = at(p);
+                builder.line_to(x, y);
+            }
+            PathCmd::CurveTo(c1, c2, p) => {
+                let ((x1, y1), (x2, y2), (x, y)) = (at(c1), at(c2), at(p));
+                builder.cubic_to(x1, y1, x2, y2, x, y);
+            }
+        }
+    }
+    builder.close();
+    builder.finish()
 }
 
 fn opaque(c: [u8; 3]) -> tiny_skia::Color {

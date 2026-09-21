@@ -33,16 +33,55 @@ pub fn draw_background(
 }
 
 fn draw_box(ops: &mut Vec<Op>, b: &render_ir::BoxItem, height_pt: f32) {
+    let shape = |mode: PaintMode| {
+        if b.has_radius() {
+            outline_op(b, height_pt, mode)
+        } else {
+            rect_op(b.rect, height_pt, mode)
+        }
+    };
     if let Some(color) = b.background {
         ops.push(Op::SetFillColor { col: rgb_color(color) });
-        ops.push(rect_op(b.rect, height_pt, PaintMode::Fill));
+        ops.push(shape(PaintMode::Fill));
     }
     if b.border_width > 0.0
         && let Some(color) = b.border_color
     {
         ops.push(Op::SetOutlineColor { col: rgb_color(color) });
         ops.push(Op::SetOutlineThickness { pt: Pt(pt(b.border_width)) });
-        ops.push(rect_op(b.rect, height_pt, PaintMode::Stroke));
+        ops.push(shape(PaintMode::Stroke));
+    }
+}
+
+/// A rounded outline as a polygon whose curves are cubic beziers.
+///
+/// printpdf reads a run of two points flagged `bezier` followed by a plain one
+/// as the two handles and the end of a curve (`serialize.rs`), so the control
+/// points are emitted in that order.
+fn outline_op(b: &render_ir::BoxItem, height_pt: f32, mode: PaintMode) -> Op {
+    use render_ir::PathCmd;
+
+    let at = |p: [f32; 2]| Point { x: Pt(pt(p[0])), y: Pt(height_pt - pt(p[1])) };
+    let mut points = Vec::new();
+    for cmd in b.outline() {
+        match cmd {
+            PathCmd::MoveTo(p) | PathCmd::LineTo(p) => {
+                points.push(LinePoint { p: at(p), bezier: false });
+            }
+            PathCmd::CurveTo(c1, c2, p) => {
+                points.push(LinePoint { p: at(c1), bezier: true });
+                points.push(LinePoint { p: at(c2), bezier: true });
+                points.push(LinePoint { p: at(p), bezier: false });
+            }
+        }
+    }
+
+    Op::DrawPolygon {
+        polygon: Polygon {
+            rings: vec![PolygonRing { points }],
+            mode,
+            winding_order: WindingOrder::NonZero,
+        },
     }
 }
 
