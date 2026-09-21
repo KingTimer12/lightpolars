@@ -1,0 +1,18 @@
+[package]
+name = "raster-out"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+render-ir.workspace = true
+paginate.workspace = true
+# Mesma versão que o resvg puxa em render-core: o pipeline de SVG e o de
+# screenshot compartilham o rasterizador, então divergir duplicaria a crate.
+tiny-skia = "0.11"
+# Rasteriza os glifos. É a mesma crate que o parley usa por baixo em
+# render-core, então a fonte já veio de um formato que ela entende.
+swash = "0.2"
+# Só pelo codificador de JPEG: o CDP permite `format: "jpeg"` no
+# captureScreenshot e o PNG de uma página inteira é grande demais para alguns
+# consumidores. Mesma versão fixada em render-core.
+image = { version = "=0.25.6", default-features = false, features = ["jpeg"] }

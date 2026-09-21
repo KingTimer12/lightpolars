@@ -73,6 +73,12 @@ pub struct DisplayList {
     pub images: Vec<ImageItem>,
     pub fonts: Vec<FontResource>,
     pub width: f32,
+    /// Altura que o layout reservou para a raiz do documento, pintada ou não.
+    ///
+    /// Existe porque um elemento invisível (um `<div style="height:3000px">`
+    /// sem fundo) não emite item nenhum: só pelos itens desenhados o documento
+    /// pareceria ter altura zero, e o screenshot sairia recortado.
+    pub layout_height: f32,
 }
 
 impl DisplayList {
@@ -84,7 +90,7 @@ impl DisplayList {
         from_boxes
             .chain(from_texts)
             .chain(from_images)
-            .fold(0.0_f32, |acc, v| acc.max(v))
+            .fold(self.layout_height.max(0.0), |acc, v| acc.max(v))
     }
 }
 
@@ -142,5 +148,23 @@ mod tests {
             rgba: std::sync::Arc::new(vec![0; 200 * 150 * 4]),
         });
         assert_eq!(dl.content_height(), 160.0);
+    }
+
+    #[test]
+    fn layout_height_conta_mesmo_sem_item_pintado() {
+        let dl = DisplayList { layout_height: 3000.0, ..Default::default() };
+        assert_eq!(dl.content_height(), 3000.0);
+    }
+
+    #[test]
+    fn item_mais_baixo_que_o_layout_ainda_vence() {
+        let mut dl = DisplayList { layout_height: 100.0, ..Default::default() };
+        dl.boxes.push(BoxItem {
+            rect: Rect { x: 0.0, y: 0.0, width: 10.0, height: 500.0 },
+            background: None,
+            border_color: None,
+            border_width: 0.0,
+        });
+        assert_eq!(dl.content_height(), 500.0);
     }
 }

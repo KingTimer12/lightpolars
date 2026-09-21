@@ -19,11 +19,39 @@ pub enum Saida {
 /// Uma página aberta. A API do consumidor abre uma por requisição, então cada
 /// uma precisa de sessionId e frameId próprios — reusar faz a segunda colidir
 /// com a primeira do lado do Puppeteer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Pagina {
     target_id: String,
     frame_id: String,
     html: Option<String>,
+    /// Viewport do screenshot, em px CSS. O PDF não usa: lá a largura vem da
+    /// folha e das margens de `Page.printToPDF`.
+    largura_viewport: f32,
+    altura_viewport: f32,
+    /// `deviceScaleFactor` do Emulation.setDeviceMetricsOverride.
+    escala_dispositivo: f32,
+}
+
+/// Viewport padrão do Puppeteer quando nada é emulado.
+const VIEWPORT_PADRAO: (f32, f32) = (800.0, 600.0);
+
+impl Pagina {
+    fn nova(target_id: String, frame_id: String) -> Self {
+        Self {
+            target_id,
+            frame_id,
+            html: None,
+            largura_viewport: VIEWPORT_PADRAO.0,
+            altura_viewport: VIEWPORT_PADRAO.1,
+            escala_dispositivo: 1.0,
+        }
+    }
+}
+
+impl Default for Pagina {
+    fn default() -> Self {
+        Self::nova(String::new(), String::new())
+    }
 }
 
 #[derive(Default)]
@@ -47,20 +75,17 @@ impl Session {
     /// CDP cru sem anexar sessão nenhuma.
     fn pagina_mut(&mut self, sessao: &Option<String>) -> &mut Pagina {
         let chave = sessao.clone().unwrap_or_else(|| "session-implicita".to_string());
-        self.paginas.entry(chave).or_insert_with(|| Pagina {
-            target_id: "target-implicito".to_string(),
-            frame_id: "frame-1".to_string(),
-            html: None,
-        })
+        self.paginas
+            .entry(chave)
+            .or_insert_with(|| Pagina::nova("target-implicito".into(), "frame-1".into()))
     }
 
     fn pagina(&self, sessao: &Option<String>) -> Pagina {
         let chave = sessao.clone().unwrap_or_else(|| "session-implicita".to_string());
-        self.paginas.get(&chave).cloned().unwrap_or_else(|| Pagina {
-            target_id: "target-implicito".to_string(),
-            frame_id: "frame-1".to_string(),
-            html: None,
-        })
+        self.paginas
+            .get(&chave)
+            .cloned()
+            .unwrap_or_else(|| Pagina::nova("target-implicito".into(), "frame-1".into()))
     }
 
     #[cfg(test)]
@@ -103,11 +128,7 @@ impl Session {
                 self.ultimo_target = Some(tid.clone());
                 self.paginas.insert(
                     sid.clone(),
-                    Pagina {
-                        target_id: tid.clone(),
-                        frame_id: format!("frame-{n}"),
-                        html: None,
-                    },
+                    Pagina::nova(tid.clone(), format!("frame-{n}")),
                 );
                 // O Puppeteer não chama attachToTarget: liga Target.setAutoAttach
                 // e espera o attachedToTarget nascer junto com o target. Sem ele,
@@ -244,6 +265,64 @@ impl Session {
                     vec![self.ok(id, &sessao, json!({ "data": dados }))]
                 }
             }
+            "Page.captureScreenshot" => match self.gerar_imagem(&sessao, &params) {
+                Ok(bytes) => {
+                    let dados = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    vec![self.ok(id, &sessao, json!({ "data": dados }))]
+                }
+                // Devolver um PNG onde o cliente pediu WebP seria pior que
+                // falhar: ele gravaria o arquivo com a extensão errada.
+                Err(motivo) => vec![self.erro(id, &sessao, &motivo)],
+            },
+            // O Puppeteer usa isto para montar o clip de um screenshot de página
+            // inteira; devolver zeros faria a imagem sair vazia.
+            "Page.getLayoutMetrics" => {
+                let pagina = self.pagina(&sessao);
+                let (largura, altura) = self.tamanho_do_conteudo(&pagina);
+                let conteudo = json!({ "x": 0, "y": 0, "width": largura, "height": altura });
+                let visual = json!({
+                    "x": 0, "y": 0,
+                    "width": pagina.largura_viewport,
+                    "height": pagina.altura_viewport,
+                    "clientWidth": pagina.largura_viewport,
+                    "clientHeight": pagina.altura_viewport,
+                    "pageX": 0, "pageY": 0, "scale": 1
+                });
+                vec![self.ok(
+                    id,
+                    &sessao,
+                    json!({
+                        "layoutViewport": visual,
+                        "visualViewport": visual,
+                        "contentSize": conteudo,
+                        "cssLayoutViewport": visual,
+                        "cssVisualViewport": visual,
+                        "cssContentSize": conteudo
+                    }),
+                )]
+            }
+            "Emulation.setDeviceMetricsOverride" => {
+                let numero = |chave: &str| params.get(chave).and_then(Value::as_f64);
+                let pagina = self.pagina_mut(&sessao);
+                // Largura/altura 0 significam "usa o padrão", não uma janela nula.
+                if let Some(w) = numero("width").filter(|w| *w > 0.0) {
+                    pagina.largura_viewport = w as f32;
+                }
+                if let Some(h) = numero("height").filter(|h| *h > 0.0) {
+                    pagina.altura_viewport = h as f32;
+                }
+                if let Some(e) = numero("deviceScaleFactor").filter(|e| *e > 0.0) {
+                    pagina.escala_dispositivo = e as f32;
+                }
+                vec![self.ok(id, &sessao, json!({}))]
+            }
+            "Emulation.clearDeviceMetricsOverride" => {
+                let pagina = self.pagina_mut(&sessao);
+                pagina.largura_viewport = VIEWPORT_PADRAO.0;
+                pagina.altura_viewport = VIEWPORT_PADRAO.1;
+                pagina.escala_dispositivo = 1.0;
+                vec![self.ok(id, &sessao, json!({}))]
+            }
             "IO.read" => {
                 let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
                 let (dados, eof) = self.ler_stream(handle);
@@ -311,6 +390,78 @@ impl Session {
         pdf_out::render_pdf(&pages, &dl.fonts, &geo)
     }
 
+    /// Dimensões do documento renderizado na largura de viewport da página.
+    fn tamanho_do_conteudo(&self, pagina: &Pagina) -> (f32, f32) {
+        let html = pagina.html.clone().unwrap_or_default();
+        let dl = render_core::render_html(&html, pagina.largura_viewport);
+        (
+            pagina.largura_viewport,
+            dl.content_height().max(pagina.altura_viewport),
+        )
+    }
+
+    /// Desenha a página como imagem. Devolve `Err` com a mensagem de erro do CDP
+    /// quando o formato pedido não é suportado.
+    fn gerar_imagem(&self, sessao: &Option<String>, params: &Value) -> Result<Vec<u8>, String> {
+        let formato = params
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        if formato != "png" && formato != "jpeg" && formato != "jpg" {
+            return Err(format!(
+                "captureScreenshot: formato '{formato}' não suportado (use png ou jpeg)"
+            ));
+        }
+
+        let pagina = self.pagina(sessao);
+        let html = pagina.html.clone().unwrap_or_default();
+        let dl = render_core::render_html(&html, pagina.largura_viewport);
+
+        let clip = params.get("clip").filter(|c| c.is_object());
+        let alem_do_viewport = params
+            .get("captureBeyondViewport")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let (page, geo, escala) = match clip {
+            Some(c) => {
+                let num = |chave: &str, padrao: f64| c.get(chave).and_then(Value::as_f64).unwrap_or(padrao);
+                let recorte = render_ir::Rect {
+                    x: num("x", 0.0) as f32,
+                    y: num("y", 0.0) as f32,
+                    width: num("width", pagina.largura_viewport as f64) as f32,
+                    height: num("height", pagina.altura_viewport as f64) as f32,
+                };
+                let (p, g) = paginate::recortar(&dl, recorte);
+                // Com clip o Chromium usa `clip.scale` como fator final; o
+                // deviceScaleFactor já está embutido nas medidas que o cliente
+                // calculou a partir de getLayoutMetrics.
+                (p, g, num("scale", 1.0) as f32)
+            }
+            None => {
+                let (p, mut g) = paginate::pagina_unica(&dl);
+                g.sheet_width = pagina.largura_viewport;
+                // Sem captureBeyondViewport a imagem tem o tamanho da janela,
+                // mesmo que o conteúdo seja menor (sobra fundo) ou maior (corta).
+                g.sheet_height = if alem_do_viewport {
+                    g.sheet_height.max(pagina.altura_viewport)
+                } else {
+                    pagina.altura_viewport
+                };
+                (p, g, pagina.escala_dispositivo)
+            }
+        };
+
+        let bytes = if formato == "png" {
+            raster_out::render_png(&page, &dl.fonts, &geo, escala)
+        } else {
+            let qualidade = params.get("quality").and_then(Value::as_u64).unwrap_or(80);
+            raster_out::render_jpeg(&page, &dl.fonts, &geo, escala, qualidade.min(100) as u8)
+        };
+        bytes.ok_or_else(|| "captureScreenshot: geometria inválida para a imagem".to_string())
+    }
+
     fn ler_stream(&mut self, handle: &str) -> (String, bool) {
         let Some((bytes, pos)) = self.streams.get_mut(handle) else {
             return (String::new(), true);
@@ -359,6 +510,14 @@ impl Session {
             "canAccessOpener": false,
             "browserContextId": "context-1"
         })
+    }
+
+    /// Resposta de erro do CDP. `-32000` é o código de erro de servidor que o
+    /// Puppeteer converte numa exceção no `await` do comando.
+    fn erro(&self, id: i64, sessao: &Option<String>, mensagem: &str) -> Saida {
+        let mut msg = json!({ "id": id, "error": { "code": -32000, "message": mensagem } });
+        Self::marcar_sessao(&mut msg, sessao);
+        Saida::Resposta(msg.to_string())
     }
 
     fn ok(&self, id: i64, sessao: &Option<String>, result: Value) -> Saida {
@@ -712,5 +871,130 @@ mod tests {
             ["result"]["frameTree"]["frame"]["id"]
             .clone();
         assert_ne!(f1, f2, "frames de páginas diferentes não podem colidir");
+    }
+
+    // --- Page.captureScreenshot ---
+
+    /// Define o HTML da sessão implícita e devolve a sessão pronta.
+    fn com_html(html: &str) -> Session {
+        let mut s = Session::new();
+        let msg = json!({
+            "id": 1,
+            "method": "Page.setDocumentContent",
+            "params": { "frameId": "f", "html": html }
+        });
+        s.handle(&msg.to_string());
+        s
+    }
+
+    fn png_de(s: &mut Session, params: Value) -> Vec<u8> {
+        let msg = json!({ "id": 9, "method": "Page.captureScreenshot", "params": params });
+        let r = respostas(&s.handle(&msg.to_string()));
+        assert_eq!(r.len(), 1);
+        let dados = r[0]["result"]["data"]
+            .as_str()
+            .unwrap_or_else(|| panic!("sem data na resposta: {}", r[0]));
+        base64::engine::general_purpose::STANDARD.decode(dados).unwrap()
+    }
+
+    /// Largura e altura lidas do cabeçalho IHDR do PNG (bytes 16..24).
+    fn dimensoes_png(bytes: &[u8]) -> (u32, u32) {
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "não é PNG");
+        let n = |i: usize| u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap());
+        (n(16), n(20))
+    }
+
+    #[test]
+    fn screenshot_devolve_png_no_tamanho_do_viewport() {
+        let mut s = com_html("<p>oi</p>");
+        let bytes = png_de(&mut s, json!({}));
+        assert_eq!(dimensoes_png(&bytes), (800, 600), "viewport padrão do Puppeteer");
+    }
+
+    #[test]
+    fn capture_beyond_viewport_usa_a_altura_do_conteudo() {
+        let mut s = com_html(r#"<div style="height:2000px"></div>"#);
+        let bytes = png_de(&mut s, json!({ "captureBeyondViewport": true }));
+        let (_, altura) = dimensoes_png(&bytes);
+        assert!(altura >= 2000, "conteúdo de 2000px saiu com {altura}px");
+    }
+
+    #[test]
+    fn clip_define_o_tamanho_e_a_escala_da_imagem() {
+        let mut s = com_html("<p>oi</p>");
+        let bytes = png_de(
+            &mut s,
+            json!({ "clip": { "x": 0, "y": 0, "width": 100, "height": 50, "scale": 2 } }),
+        );
+        assert_eq!(dimensoes_png(&bytes), (200, 100));
+    }
+
+    #[test]
+    fn device_scale_factor_multiplica_o_screenshot() {
+        let mut s = com_html("<p>oi</p>");
+        s.handle(
+            r#"{"id":2,"method":"Emulation.setDeviceMetricsOverride","params":{"width":400,"height":300,"deviceScaleFactor":2}}"#,
+        );
+        let bytes = png_de(&mut s, json!({}));
+        assert_eq!(dimensoes_png(&bytes), (800, 600), "400x300 em 2x");
+    }
+
+    #[test]
+    fn clear_device_metrics_volta_ao_viewport_padrao() {
+        let mut s = com_html("<p>oi</p>");
+        s.handle(
+            r#"{"id":2,"method":"Emulation.setDeviceMetricsOverride","params":{"width":400,"height":300,"deviceScaleFactor":2}}"#,
+        );
+        s.handle(r#"{"id":3,"method":"Emulation.clearDeviceMetricsOverride","params":{}}"#);
+        let bytes = png_de(&mut s, json!({}));
+        assert_eq!(dimensoes_png(&bytes), (800, 600));
+    }
+
+    #[test]
+    fn screenshot_em_jpeg_sai_com_marcador_de_jpeg() {
+        let mut s = com_html("<p>oi</p>");
+        let bytes = png_de(&mut s, json!({ "format": "jpeg", "quality": 60 }));
+        assert_eq!(&bytes[..2], b"\xff\xd8", "SOI de JPEG");
+    }
+
+    #[test]
+    fn formato_nao_suportado_vira_erro_em_vez_de_png_disfarcado() {
+        let mut s = com_html("<p>oi</p>");
+        let r = respostas(&s.handle(
+            r#"{"id":9,"method":"Page.captureScreenshot","params":{"format":"webp"}}"#,
+        ));
+        assert!(r[0]["result"].is_null(), "não devia responder com sucesso");
+        assert_eq!(r[0]["error"]["code"], -32000);
+        assert!(
+            r[0]["error"]["message"].as_str().unwrap().contains("webp"),
+            "mensagem devia nomear o formato: {}",
+            r[0]["error"]["message"]
+        );
+    }
+
+    #[test]
+    fn get_layout_metrics_reporta_a_altura_real_do_conteudo() {
+        let mut s = com_html(r#"<div style="height:3000px"></div>"#);
+        let r = respostas(&s.handle(r#"{"id":5,"method":"Page.getLayoutMetrics","params":{}}"#));
+        let altura = r[0]["result"]["cssContentSize"]["height"].as_f64().unwrap();
+        assert!(altura >= 3000.0, "contentSize veio {altura}");
+        assert_eq!(r[0]["result"]["cssLayoutViewport"]["clientWidth"], 800.0);
+    }
+
+    #[test]
+    fn viewport_emulado_muda_a_largura_de_layout() {
+        let mut s = com_html("<p>oi</p>");
+        s.handle(
+            r#"{"id":2,"method":"Emulation.setDeviceMetricsOverride","params":{"width":1200,"height":400,"deviceScaleFactor":1}}"#,
+        );
+        let bytes = png_de(&mut s, json!({}));
+        assert_eq!(dimensoes_png(&bytes), (1200, 400));
+    }
+
+    #[test]
+    fn screenshot_sem_html_nao_panica() {
+        let mut s = Session::new();
+        let bytes = png_de(&mut s, json!({}));
+        assert_eq!(dimensoes_png(&bytes), (800, 600));
     }
 }

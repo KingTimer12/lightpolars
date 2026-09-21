@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/render-ir", "crates/render-core", "crates/paginate", "crates/pdf-out", "crates/cdp-server"]
+members = ["crates/render-ir", "crates/render-core", "crates/paginate", "crates/pdf-out", "crates/raster-out", "crates/cdp-server"]
 
 [workspace.package]
 edition = "2024"
@@ -11,4 +11,5 @@ render-ir = { path = "crates/render-ir" }
 render-core = { path = "crates/render-core" }
 paginate = { path = "crates/paginate" }
 pdf-out = { path = "crates/pdf-out" }
+raster-out = { path = "crates/raster-out" }
 cdp-server = { path = "crates/cdp-server" }

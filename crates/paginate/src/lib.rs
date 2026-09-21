@@ -1,7 +1,7 @@
 //! Corte de um documento contínuo em páginas.
 //! Aritmética pura sobre retângulos: não renderiza nada e não conhece blitz.
 
-use render_ir::{BoxItem, DisplayList, FontResource, ImageItem, TextRun};
+use render_ir::{BoxItem, DisplayList, FontResource, ImageItem, Rect, TextRun};
 
 pub const A4_LARGURA_PX: f32 = 793.7;
 pub const A4_ALTURA_PX: f32 = 1122.5;
@@ -60,6 +60,41 @@ pub fn merge_fonts(
         fonts.extend(extra.fonts.iter().cloned());
     }
     fonts
+}
+
+/// Coloca o documento inteiro numa "página" só, do tamanho exato do conteúdo.
+///
+/// É o caminho do screenshot, não o da impressão: não há folha, margem nem
+/// corte — o consumidor quer uma imagem da página como ela é. Por isso os itens
+/// vão sem deslocamento, já que a display list nasce na origem.
+pub fn pagina_unica(content: &DisplayList) -> (Page, PageGeometry) {
+    recortar(
+        content,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: content.width,
+            height: content.content_height(),
+        },
+    )
+}
+
+/// Recorte retangular do documento, na mesma forma que `pagina_unica`.
+///
+/// É o `clip` do `Page.captureScreenshot`. Os itens são transladados para a
+/// origem do recorte; nada é descartado, porque quem desenha já ignora o que
+/// cai fora do bitmap — filtrar aqui cortaria pela caixa e não pelo pixel, e
+/// sumiria com um texto cuja baseline fica fora mas cujos glifos entram.
+pub fn recortar(content: &DisplayList, clip: Rect) -> (Page, PageGeometry) {
+    let geo = PageGeometry {
+        sheet_width: clip.width.max(1.0),
+        sheet_height: clip.height.max(1.0),
+        margins: Margins::default(),
+    };
+    let (dx, dy) = (-clip.x, -clip.y);
+    let mut page = Page::default();
+    empilhar(&mut page, content, dx, dy, 0);
+    (page, geo)
 }
 
 pub fn paginate(
@@ -422,5 +457,70 @@ mod tests {
         for page in &pages {
             assert_eq!(page.images.len(), 1, "logo do header some numa das páginas");
         }
+    }
+}
+
+#[cfg(test)]
+mod testes_pagina_unica {
+    use super::*;
+    use render_ir::BoxItem;
+
+    fn dl_com_caixa(y: f32, altura: f32) -> DisplayList {
+        DisplayList {
+            width: 800.0,
+            boxes: vec![BoxItem {
+                rect: Rect { x: 0.0, y, width: 100.0, height: altura },
+                background: Some([1, 2, 3]),
+                border_color: None,
+                border_width: 0.0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn folha_tem_a_largura_da_lista_e_a_altura_do_conteudo() {
+        let (_, geo) = pagina_unica(&dl_com_caixa(50.0, 120.0));
+        assert_eq!(geo.sheet_width, 800.0);
+        assert_eq!(geo.sheet_height, 170.0);
+        assert_eq!(geo.margins, Margins::default());
+    }
+
+    #[test]
+    fn nao_corta_conteudo_alto() {
+        let (page, geo) = pagina_unica(&dl_com_caixa(0.0, 9000.0));
+        assert_eq!(page.boxes.len(), 1);
+        assert_eq!(geo.sheet_height, 9000.0);
+    }
+
+    #[test]
+    fn itens_mantem_a_posicao_original() {
+        let (page, _) = pagina_unica(&dl_com_caixa(50.0, 120.0));
+        assert_eq!(page.boxes[0].rect.y, 50.0);
+    }
+
+    #[test]
+    fn lista_vazia_vira_folha_minima_em_vez_de_zero() {
+        let (page, geo) = pagina_unica(&DisplayList::default());
+        assert!(page.boxes.is_empty());
+        assert_eq!((geo.sheet_width, geo.sheet_height), (1.0, 1.0));
+    }
+
+    #[test]
+    fn recorte_translada_os_itens_para_a_origem() {
+        let dl = dl_com_caixa(300.0, 50.0);
+        let (page, geo) = recortar(&dl, Rect { x: 10.0, y: 280.0, width: 200.0, height: 100.0 });
+        assert_eq!((geo.sheet_width, geo.sheet_height), (200.0, 100.0));
+        assert_eq!(page.boxes[0].rect.x, -10.0);
+        assert_eq!(page.boxes[0].rect.y, 20.0);
+    }
+
+    #[test]
+    fn recorte_nao_descarta_item_fora_da_caixa() {
+        // Quem desenha corta no pixel; filtrar aqui perderia glifo de baseline
+        // fora do recorte mas com desenho dentro.
+        let dl = dl_com_caixa(5000.0, 10.0);
+        let (page, _) = recortar(&dl, Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 });
+        assert_eq!(page.boxes.len(), 1);
     }
 }
