@@ -30,6 +30,10 @@ pub fn render_html(html: &str, width_px: f32) -> DisplayList {
     // largura negativa ou NaN, que saturariam em 0.
     let largura_viewport = width_px.round().max(1.0) as u32;
 
+    // O blitz só entende SVG que chega como recurso; `<svg>` escrito no HTML
+    // vira caixa vazia. A reescrita normaliza isso antes do parse.
+    let html = &crate::svg::reescrever_svg_inline(html);
+
     let mut altura = ALTURA_INICIAL_PX;
     loop {
         let (dl, altura_usada) = layout_e_extrai(html, width_px, largura_viewport, altura);
@@ -126,18 +130,32 @@ fn layout_e_extrai(
             }
         }
 
+        let caixa_da_imagem = Rect {
+            x,
+            y,
+            width: layout.size.width,
+            height: layout.size.height,
+        };
         if let Some(raster) = el.raster_image_data() {
             dl.images.push(ImageItem {
-                rect: Rect {
-                    x,
-                    y,
-                    width: layout.size.width,
-                    height: layout.size.height,
-                },
+                rect: caixa_da_imagem,
                 width_px: raster.width,
                 height_px: raster.height,
                 rgba: raster.data.clone(),
             });
+        } else if let Some(tree) = el.svg_data() {
+            // SVG é vetorial, mas o resto do pipeline (paginate, pdf-out) só
+            // conhece bitmap: rasterizamos no tamanho final da caixa.
+            if let Some((largura, altura, rgba)) =
+                crate::svg::rasterizar(tree, caixa_da_imagem.width, caixa_da_imagem.height)
+            {
+                dl.images.push(ImageItem {
+                    rect: caixa_da_imagem,
+                    width_px: largura,
+                    height_px: altura,
+                    rgba: Arc::new(rgba),
+                });
+            }
         }
 
         let Some(text_layout) = el.inline_layout_data.as_ref() else {
@@ -203,11 +221,11 @@ fn layout_e_extrai(
     dl.fonts = fontes;
 
     let raiz = doc.root_element().final_layout;
-    let altura_usada = raiz
-        .size
-        .height
-        .max(raiz.content_size.height)
-        .max(dl.content_height());
+    // A raiz sabe a altura reservada pelo layout; a display list, só o que foi
+    // pintado. Guardar as duas deixa o screenshot enxergar espaço em branco
+    // deliberado sem que a paginação perca conteúdo desenhado fora da raiz.
+    dl.layout_height = raiz.size.height.max(raiz.content_size.height);
+    let altura_usada = dl.content_height();
 
     (dl, altura_usada)
 }
@@ -282,6 +300,7 @@ fn rgb(c: &style::color::AbsoluteColor) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     const HTML_PARAGRAFO: &str = r#"<!DOCTYPE html><html><head><style>
         body { margin: 0; font-family: Helvetica, Arial, sans-serif; font-size: 16px; }
@@ -473,6 +492,55 @@ mod tests {
         let img = &dl.images[0];
         assert!((img.rect.width - 4.0).abs() < 1.0, "largura intrínseca: {:?}", img.rect);
         assert!((img.rect.height - 2.0).abs() < 1.0, "altura intrínseca: {:?}", img.rect);
+    }
+
+    const SVG_20X10: &str = r##"<svg width="20" height="10" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="10" fill="#0000ff"/></svg>"##;
+
+    #[test]
+    fn svg_em_img_data_uri_vira_item_da_display_list() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(SVG_20X10);
+        let html = format!(r#"<img style="width:40px;height:20px" src="data:image/svg+xml;base64,{b64}" />"#);
+        let dl = render_html(&html, 500.0);
+        assert_eq!(dl.images.len(), 1, "o SVG não chegou na display list");
+        let img = &dl.images[0];
+        assert!((img.rect.width - 40.0).abs() < 1.0, "caixa: {:?}", img.rect);
+        // Rasterizado em 3x a caixa, não no tamanho intrínseco do viewBox.
+        assert_eq!((img.width_px, img.height_px), (120, 60));
+        assert_eq!(img.rgba.len(), 120 * 60 * 4);
+    }
+
+    #[test]
+    fn svg_sem_dimensao_usa_o_tamanho_intrinseco() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(SVG_20X10);
+        let html = format!(r#"<img src="data:image/svg+xml;base64,{b64}" />"#);
+        let dl = render_html(&html, 500.0);
+        let img = &dl.images[0];
+        assert!((img.rect.width - 20.0).abs() < 1.0, "largura intrínseca: {:?}", img.rect);
+        assert!((img.rect.height - 10.0).abs() < 1.0, "altura intrínseca: {:?}", img.rect);
+    }
+
+    #[test]
+    fn svg_inline_vira_imagem_com_tamanho_intrinseco() {
+        let dl = render_html(&format!("<body style=\"margin:0\">{SVG_20X10}</body>"), 500.0);
+        assert_eq!(dl.images.len(), 1, "o <svg> inline não virou imagem");
+        let img = &dl.images[0];
+        assert!((img.rect.width - 20.0).abs() < 1.0, "caixa: {:?}", img.rect);
+        assert!((img.rect.height - 10.0).abs() < 1.0, "caixa: {:?}", img.rect);
+    }
+
+    #[test]
+    fn svg_inline_respeita_css_da_tag() {
+        let com_estilo = SVG_20X10.replace("<svg ", r#"<svg style="width:100px;height:50px" "#);
+        let dl = render_html(&format!("<body style=\"margin:0\">{com_estilo}</body>"), 500.0);
+        let img = &dl.images[0];
+        assert!((img.rect.width - 100.0).abs() < 1.0, "caixa: {:?}", img.rect);
+        assert!((img.rect.height - 50.0).abs() < 1.0, "caixa: {:?}", img.rect);
+    }
+
+    #[test]
+    fn svg_em_http_e_ignorado_sem_abrir_socket() {
+        let dl = render_html(r#"<img src="https://exemplo.invalido/logo.svg" />"#, 500.0);
+        assert!(dl.images.is_empty(), "esquema não-data: não pode virar imagem");
     }
 
     #[test]

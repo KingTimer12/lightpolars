@@ -7,7 +7,7 @@ version.workspace = true
 render-ir.workspace = true
 base64 = "0.22"
 percent-encoding = "2"
-blitz-dom = "0.2.4"
+blitz-dom = { version = "0.2.4", features = ["svg"] }
 blitz-html = "0.2.0"
 blitz-traits = "0.2"
 parley = "0.6"
@@ -18,3 +18,7 @@ slab = "0.4"
 # só para ligar os formatos pela unificação de features do cargo — nenhum código
 # nosso chama a crate diretamente.
 image = { version = "=0.25.6", default-features = false, features = ["png", "jpeg", "webp"] }
+# Mesma versão de usvg que o blitz-dom usa (`svg = ["dep:usvg"]`, usvg 0.45.1):
+# o `usvg::Tree` devolvido por `svg_data()` precisa ser o mesmo tipo.
+usvg = "0.45.1"
+resvg = { version = "0.45.1", default-features = false }
