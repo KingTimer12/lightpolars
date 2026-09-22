@@ -141,10 +141,59 @@ pub struct ImageItem {
     pub order: u32,
 }
 
+/// Shared, read-only font file contents.
+///
+/// Type-erased on purpose: the layout engine already holds every font in an
+/// `Arc` of its own, so this can borrow that allocation instead of copying a
+/// file that runs from hundreds of KB to several MB. It also lets a test build
+/// one straight from a `Vec<u8>`, with no engine in sight.
+#[derive(Clone)]
+pub struct FontBytes(std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>);
+
+impl FontBytes {
+    pub fn new<T: AsRef<[u8]> + Send + Sync + 'static>(bytes: T) -> Self {
+        Self(std::sync::Arc::new(bytes))
+    }
+
+    /// Takes over an `Arc` the caller already holds, without copying it.
+    pub fn from_arc(bytes: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl std::ops::Deref for FontBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        (*self.0).as_ref()
+    }
+}
+
+impl AsRef<[u8]> for FontBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+/// By content, not by address: two fonts that hold the same file are the same
+/// font, whichever allocation each one came from.
+impl PartialEq for FontBytes {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl std::fmt::Debug for FontBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The bytes themselves are megabytes of noise; the length is what a
+        // reader of a failed assertion actually wants.
+        f.debug_struct("FontBytes").field("len", &self.len()).finish()
+    }
+}
+
 /// Bytes of a font used by the document, with the face index inside the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontResource {
-    pub bytes: Vec<u8>,
+    pub bytes: FontBytes,
     pub face_index: usize,
 }
 

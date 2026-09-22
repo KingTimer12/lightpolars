@@ -15,7 +15,7 @@ use crate::style::{background_color, box_border, brush_color, corner_radii};
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
-use render_ir::{BoxItem, DisplayList, FontResource, Glyph, ImageItem, Rect, TextRun};
+use render_ir::{BoxItem, DisplayList, FontBytes, FontResource, Glyph, ImageItem, Rect, TextRun};
 use std::sync::Arc;
 
 /// Initial layout viewport height. The document is continuous: the real height
@@ -37,9 +37,16 @@ pub fn render_html(html: &str, width_px: f32) -> DisplayList {
     // parse.
     let html = &crate::svg::inline_svg_to_img(html);
 
+    // Parsed once and laid out as many times as the height search needs: the
+    // parse and the resource decode do not depend on the viewport, and redoing
+    // them per attempt used to double the cost of any document taller than the
+    // initial guess.
+    let (mut doc, collector) = build_document(html);
+
     let mut height = INITIAL_HEIGHT_PX;
     loop {
-        let (dl, used_height) = layout_and_extract(html, width_px, viewport_width, height);
+        let (dl, used_height) =
+            layout_and_extract(&mut doc, &collector, width_px, viewport_width, height);
 
         if used_height <= height as f32 {
             return dl;
@@ -55,14 +62,8 @@ pub fn render_html(html: &str, width_px: f32) -> DisplayList {
     }
 }
 
-/// Lays out at the requested viewport height and returns the display list plus
-/// the height the content actually took (the basis for deciding to grow).
-fn layout_and_extract(
-    html: &str,
-    width_px: f32,
-    viewport_width: u32,
-    viewport_height: u32,
-) -> (DisplayList, f32) {
+/// Parses the HTML and registers the fonts it declares, without laying out.
+fn build_document(html: &str) -> (HtmlDocument, Arc<ResourceCollector>) {
     // The provider resolves `data:` synchronously and refuses any other scheme;
     // the collector holds what was resolved so we can apply it below.
     let collector = Arc::new(ResourceCollector::default());
@@ -73,12 +74,6 @@ fn layout_and_extract(
             ..Default::default()
         },
     );
-    doc.set_viewport(Viewport::new(
-        viewport_width,
-        viewport_height,
-        1.0,
-        ColorScheme::Light,
-    ));
     // blitz never fetches an @font-face declared in an inline <style>, so the
     // faces are registered by hand before the first layout (see fonts.rs).
     for bytes in crate::fonts::inline_font_faces(html) {
@@ -86,6 +81,24 @@ fn layout_and_extract(
             blitz_traits::net::Bytes::from(bytes),
         ));
     }
+    (doc, collector)
+}
+
+/// Lays out at the requested viewport height and returns the display list plus
+/// the height the content actually took (the basis for deciding to grow).
+fn layout_and_extract(
+    doc: &mut HtmlDocument,
+    collector: &Arc<ResourceCollector>,
+    width_px: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> (DisplayList, f32) {
+    doc.set_viewport(Viewport::new(
+        viewport_width,
+        viewport_height,
+        1.0,
+        ColorScheme::Light,
+    ));
     doc.resolve(0.0);
 
     // Images only exist once the resource enters the document, and that
@@ -104,6 +117,8 @@ fn layout_and_extract(
         ..Default::default()
     };
     let mut fonts: Vec<FontResource> = Vec::new();
+    // Blob id -> index in `fonts`, the fast path of `intern_font`.
+    let mut seen_fonts: Vec<((u64, usize), usize)> = Vec::new();
     // Document paint order, shared by boxes and images so the renderers can
     // interleave them (see `render_ir::ImageItem::order`).
     let mut order = PaintOrder::default();
@@ -171,7 +186,7 @@ fn layout_and_extract(
                     continue;
                 };
                 let run = glyph_run.run();
-                let font_index = intern_font(&mut fonts, run.font());
+                let font_index = intern_font(&mut fonts, &mut seen_fonts, run.font());
                 let size = run.font_size();
 
                 let offset = glyph_run.offset();
@@ -270,20 +285,41 @@ impl PaintOrder {
 }
 
 /// Stores the font once and returns its index in `DisplayList::fonts`.
-fn intern_font(fonts: &mut Vec<FontResource>, font: &parley::FontData) -> usize {
-    let bytes: &[u8] = font.data.as_ref();
+///
+/// `seen` maps a blob id to that index. The id is the fast path that matters:
+/// this runs once per glyph run, which is hundreds of times per page, and
+/// identifying the font by comparing the whole file — megabytes — on each of
+/// them was pure waste. Two distinct blobs holding the same file still fall
+/// through to the content comparison, so the table stays deduplicated.
+fn intern_font(
+    fonts: &mut Vec<FontResource>,
+    seen: &mut Vec<((u64, usize), usize)>,
+    font: &parley::FontData,
+) -> usize {
     let face = font.index as usize;
-    if let Some(pos) = fonts
-        .iter()
-        .position(|f| f.face_index == face && f.bytes.len() == bytes.len() && f.bytes == bytes)
-    {
-        return pos;
+    let key = (font.data.id(), face);
+    if let Some((_, pos)) = seen.iter().find(|(k, _)| *k == key) {
+        return *pos;
     }
-    fonts.push(FontResource {
-        bytes: bytes.to_vec(),
-        face_index: face,
-    });
-    fonts.len() - 1
+
+    let bytes: &[u8] = font.data.as_ref();
+    let pos = match fonts
+        .iter()
+        .position(|f| f.face_index == face && f.bytes.len() == bytes.len() && *f.bytes == *bytes)
+    {
+        Some(pos) => pos,
+        None => {
+            // The blob's own allocation, adopted rather than copied: the layout
+            // engine keeps the font alive for as long as we hold this.
+            fonts.push(FontResource {
+                bytes: FontBytes::from_arc(font.data.clone().into_raw_parts().0),
+                face_index: face,
+            });
+            fonts.len() - 1
+        }
+    };
+    seen.push((key, pos));
+    pos
 }
 
 #[cfg(test)]

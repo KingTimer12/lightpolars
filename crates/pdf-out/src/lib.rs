@@ -96,7 +96,7 @@ mod tests {
             }],
         };
         let font = render_ir::FontResource {
-            bytes: load_test_font(),
+            bytes: render_ir::FontBytes::new(load_test_font()),
             face_index: 0,
         };
         let bytes = render_pdf(&[page], &[font], &geo());

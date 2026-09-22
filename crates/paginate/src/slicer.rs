@@ -219,7 +219,7 @@ mod tests {
     }
 
     fn font(marker: u8) -> FontResource {
-        FontResource { bytes: vec![marker], face_index: 0 }
+        FontResource { bytes: render_ir::FontBytes::new(vec![marker]), face_index: 0 }
     }
 
     #[test]
@@ -233,9 +233,9 @@ mod tests {
 
         let fonts = merge_fonts(&content, Some(&header), Some(&footer));
         assert_eq!(fonts.len(), 3);
-        assert_eq!(fonts[0].bytes, vec![1]);
-        assert_eq!(fonts[1].bytes, vec![2]);
-        assert_eq!(fonts[2].bytes, vec![3]);
+        assert_eq!(&*fonts[0].bytes, &[1u8][..]);
+        assert_eq!(&*fonts[1].bytes, &[2u8][..]);
+        assert_eq!(&*fonts[2].bytes, &[3u8][..]);
     }
 
     #[test]
@@ -262,9 +262,9 @@ mod tests {
         assert_eq!(idx, vec![1, 2, 0]);
 
         let fonts = merge_fonts(&content, Some(&header), Some(&footer));
-        assert_eq!(fonts[idx[0]].bytes, vec![2], "header points at the header font");
-        assert_eq!(fonts[idx[1]].bytes, vec![3], "footer points at the footer font");
-        assert_eq!(fonts[idx[2]].bytes, vec![1], "content points at its own font");
+        assert_eq!(&*fonts[idx[0]].bytes, &[2u8][..], "header points at the header font");
+        assert_eq!(&*fonts[idx[1]].bytes, &[3u8][..], "footer points at the footer font");
+        assert_eq!(&*fonts[idx[2]].bytes, &[1u8][..], "content points at its own font");
     }
 
     fn image_at(y: f32, height: f32) -> ImageItem {
