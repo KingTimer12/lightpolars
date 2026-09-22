@@ -30,6 +30,13 @@ strip = "symbols"
 # Instrumented build: only used to collect profiles, never shipped. No LTO and
 # many codegen units, because fat LTO on the instrumented IR is what blows the
 # builder's memory (all of blitz/usvg/resvg/image bitcode in one process).
+# Release com símbolos: o dhat só sabe atribuir uma alocação se conseguir
+# resolver a pilha, e o release normal tira os símbolos.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
 [profile.pgo-gen]
 inherits = "release"
 lto = false
