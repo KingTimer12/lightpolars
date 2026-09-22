@@ -3,3 +3,8 @@
 # workspace de execução do SDD (scratch, não versionar)
 .superpowers/
 .ref/
+# dependências de teste (puppeteer-core), não versionar
+node_modules/
+
+# saída do profiler de heap (exemplo `heap`)
+dhat-heap.json
