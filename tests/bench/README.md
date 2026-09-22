@@ -1,14 +1,13 @@
 # Benchmark
 
-Compara três motores no mesmo cliente e com o mesmo HTML:
+Compara dois motores no mesmo cliente e com o mesmo HTML:
 
-- `normal` — `cdp-server` do perfil `release`
-- `pgo` — `cdp-server` do perfil `pgo` (build guiado por perfil)
+- `motor` — o `cdp-server` do perfil `release`
 - `chromium` — Chrome/Chromium headless real
 
-O cliente é `puppeteer-core` para os três, de propósito: assim a diferença
-medida vem do motor, não do driver. Os documentos (`documentos.js`) são os
-mesmos três perfis do workload de PGO — texto pesado, gráficos e tabelas.
+O cliente é `puppeteer-core` para os dois, de propósito: assim a diferença
+medida vem do motor, não do driver. Os documentos (`documentos.js`) são três
+perfis — texto pesado, gráficos e tabelas.
 
 ## Rodar
 
@@ -17,12 +16,12 @@ npm i -D puppeteer-core          # ou aponte NODE_PATH para outro projeto
 tests/bench/rodar.sh
 ```
 
-O script constrói os binários, sobe cada um numa porta, mede e derruba tudo.
+O script constrói o binário, sobe numa porta, mede e derruba tudo.
 
-Só os dois motores Rust:
+Só o motor, sem Chromium:
 
 ```sh
-MOTORES=normal,pgo tests/bench/rodar.sh
+MOTORES=motor tests/bench/rodar.sh
 ```
 
 Contra um Chromium já no ar, sem construir nada:
@@ -41,15 +40,15 @@ ITERACOES=50 JSON=/tmp/bench.json node tests/bench/bench.js
 
 | Variável | Padrão | Para quê |
 |---|---|---|
-| `MOTORES` | `normal,pgo,chromium` | quais medir |
+| `MOTORES` | `motor,chromium` | quais medir |
 | `ITERACOES` | `20` | repetições medidas por documento |
 | `AQUECIMENTO` | `3` | repetições descartadas antes de medir |
-| `PORTA_NORMAL` / `PORTA_PGO` | `9222` / `9223` | portas dos motores |
+| `PORTA_MOTOR` | `9345` | porta do motor (fora da 9222, que costuma estar tomada) |
 | `CHROME_PATH` | detectado | executável do Chromium |
 | `CHROME_WS` | — | usa um Chromium já no ar em vez de subir um |
-| `PULAR_BUILD` | — | reaproveita binários já construídos |
+| `PULAR_BUILD` | — | reaproveita o binário já construído |
 | `JSON` | — | grava o resultado bruto |
-| `PID_NORMAL` / `PID_PGO` / `PID_CHROMIUM` | — | PID do motor, para medir CPU e RAM |
+| `PID_MOTOR` / `PID_CHROMIUM` | — | PID do motor, para medir CPU e RAM |
 
 ## Ler o resultado
 
@@ -74,8 +73,8 @@ sobe os motores por fora.
 
 Cuidados na interpretação:
 
-- `RUSTFLAGS` do `rodar.sh` usa `target-cpu=native`, enquanto as imagens Docker
-  fixam `x86-64-v3`. O ganho local é o teto, não o número de produção.
+- `RUSTFLAGS` do `rodar.sh` usa `target-cpu=native`, enquanto a imagem Docker
+  fixa `x86-64-v3`. O ganho local é o teto, não o número de produção.
 - Chromium e motor não produzem PDFs idênticos; o benchmark mede tempo, não
   fidelidade. Para fidelidade, use `tests/aceitacao/`.
 - O Chromium paga o custo de subir o processo uma vez; as iterações medidas já

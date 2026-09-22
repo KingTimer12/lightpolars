@@ -1,9 +1,8 @@
 //! Heap profile of one heavy document, to attribute the peak RSS.
 //!
-//! Drives the session in process, exactly like `workload`, but under dhat so
-//! every live byte at the peak carries the call stack that allocated it. The
-//! document is the `texto-pesado` of `tests/bench`, which is the one that
-//! drives the peak (800x4829 px).
+//! Drives the session in process, under dhat, so that every live byte at the
+//! peak carries the call stack that allocated it. The document is the
+//! `texto-pesado` of `tests/bench`, the one that drives the peak (800x4829 px).
 //!
 //!   cargo run --profile profiling --features dhat-heap --example heap
 //!
@@ -54,7 +53,7 @@ fn send(session: &mut Session, method: &str, params: serde_json::Value) -> serde
     json!({})
 }
 
-/// Same document as `tests/bench/documentos.js` and `workload.rs`.
+/// Same document as `tests/bench/documentos.js`.
 fn text_heavy(paragraphs: usize) -> String {
     let mut html = String::from(
         "<!DOCTYPE html><html><body style='font-family:sans-serif;font-size:12px'>",

@@ -17,7 +17,7 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 # Alocador global do binário. Layout e rasterização são cargas de muitas
 # alocações pequenas e de vida curta, exatamente onde o malloc do sistema
-# (sobretudo o do glibc, que é o da imagem de PGO) fica atrás.
+# (sobretudo o do glibc, que é o da imagem de runtime) fica atrás.
 mimalloc = { version = "0.1", default-features = false }
 # Profiler de heap, só no exemplo `heap`. Fica opcional porque substitui o
 # alocador global: nada que vá para produção pode carregá-lo.

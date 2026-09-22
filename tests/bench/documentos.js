@@ -1,7 +1,7 @@
-// Os mesmos três perfis de documento do workload de PGO (`crates/cdp-server/
-// examples/workload.rs`), reescritos em JS para que o Chromium receba
+// Os três perfis de documento do bench, em JS para que o Chromium receba
 // exatamente o mesmo HTML que o motor. Qualquer divergência aqui invalida a
-// comparação, então mantenha os dois lados em sincronia.
+// comparação, então mantenha em sincronia com `crates/cdp-server/examples/`,
+// que roda os mesmos documentos no processo.
 
 // PNG 1x1 vermelho opaco.
 const PNG =

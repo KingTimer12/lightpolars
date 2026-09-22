@@ -4,28 +4,10 @@ on:
   push:
     branches: [ "master" ]
   workflow_dispatch:
-    inputs:
-      bolt:
-        description: "Also apply BOLT on top of PGO (x86-64 only)"
-        type: boolean
-        default: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: plain
-            dockerfile: ./Dockerfile
-            tag: latest
-            sha_prefix: ""
-          - variant: pgo
-            dockerfile: ./pgo.Dockerfile
-            tag: pgo
-            sha_prefix: "pgo-"
 
     steps:
       - name: Check out the code
@@ -44,12 +26,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: ./Dockerfile
           push: true
-          build-args: |
-            ENABLE_BOLT=${{ inputs.bolt && '1' || '0' }}
-          cache-from: type=gha,scope=${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars:${{ matrix.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars:${{ matrix.sha_prefix }}${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars:${{ github.sha }}

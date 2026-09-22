@@ -20,6 +20,15 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# Fat LTO with a single codegen unit: the whole program, including blitz,
+# usvg, resvg and the image codecs, is optimized as one unit. It is the slow
+# end of the build-time scale and the fast end of the runtime one, which is the
+# right trade for a binary built once and served many times.
+#
+# This used to be paired with a PGO build. It was dropped: once the hot path it
+# was optimizing (comparing font files byte by byte on every glyph run) was
+# gone, PGO measured level with or slower than plain release, and it cost an
+# instrument-run-rebuild cycle on every CI run.
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -27,28 +36,9 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
-# Instrumented build: only used to collect profiles, never shipped. No LTO and
-# many codegen units, because fat LTO on the instrumented IR is what blows the
-# builder's memory (all of blitz/usvg/resvg/image bitcode in one process).
-# Release com símbolos: o dhat só sabe atribuir uma alocação se conseguir
-# resolver a pilha, e o release normal tira os símbolos.
+# Release with symbols: dhat can only attribute an allocation if it can resolve
+# the stack, and release strips them.
 [profile.profiling]
 inherits = "release"
 debug = true
-strip = false
-
-[profile.pgo-gen]
-inherits = "release"
-lto = false
-codegen-units = 16
-strip = false
-
-# Optimized build, driven by the collected profiles. Thin LTO instead of fat:
-# it is parallel and per-module, so the peak is a fraction of fat's, and with
-# PGO on top the result lands within noise of fat LTO alone.
-# BOLT needs the symbols and the relocations, hence strip = false.
-[profile.pgo]
-inherits = "release"
-lto = "thin"
-codegen-units = 16
 strip = false

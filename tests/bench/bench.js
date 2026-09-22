@@ -1,27 +1,26 @@
-// Benchmark comparativo: motor normal, motor com PGO e Chromium, medidos pelo
-// mesmo cliente (puppeteer-core) e com o mesmo HTML. O cliente é igual de
-// propósito: a diferença medida tem que vir do motor, não do driver.
+// Benchmark comparativo: o motor e o Chromium, medidos pelo mesmo cliente
+// (puppeteer-core) e com o mesmo HTML. O cliente é igual de propósito: a
+// diferença medida tem que vir do motor, não do driver.
 //
 // Uso (o puppeteer-core pode morar em outro projeto):
 //   NODE_PATH=/caminho/para/api/node_modules node tests/bench/bench.js
 //
 // Variáveis:
-//   WS_NORMAL   ws:// do binário sem PGO        (padrão ws://127.0.0.1:9222)
-//   WS_PGO      ws:// do binário com PGO        (padrão ws://127.0.0.1:9223)
+//   WS_MOTOR    ws:// do cdp-server             (padrão ws://127.0.0.1:9345)
 //   CHROME_WS   ws:// de um Chromium já no ar   (senão sobe um com CHROME_PATH)
 //   CHROME_PATH executável do Chrome/Chromium
 //   ITERACOES   repetições medidas por documento (padrão 20)
 //   AQUECIMENTO repetições descartadas antes de medir (padrão 3)
-//   MOTORES     lista separada por vírgula: normal,pgo,chromium
+//   MOTORES     lista separada por vírgula: motor,chromium
 //   JSON        caminho para gravar o resultado bruto
-//   PID_NORMAL / PID_PGO / PID_CHROMIUM
+//   PID_MOTOR / PID_CHROMIUM
 //               PID do processo do motor, para medir CPU e RAM. Só faz falta
 //               quando o motor foi subido por fora (o `rodar.sh` preenche, e o
 //               Chromium lançado aqui é descoberto sozinho). Sem o PID, o tempo
 //               continua sendo medido e as colunas de recurso saem vazias.
 //
 // Um motor que não responder é reportado como indisponível e os demais seguem —
-// medir normal contra pgo sem Chromium é um uso legítimo.
+// medir só o motor, sem Chromium, é um uso legítimo.
 const fs = require('node:fs')
 const puppeteer = require('puppeteer-core')
 const documentos = require('./documentos')
@@ -48,8 +47,7 @@ async function conectar(motor) {
   }
 
   const browserWSEndpoint = {
-    normal: process.env.WS_NORMAL ?? 'ws://127.0.0.1:9222',
-    pgo: process.env.WS_PGO ?? 'ws://127.0.0.1:9223',
+    motor: process.env.WS_MOTOR ?? 'ws://127.0.0.1:9345',
     chromium: process.env.CHROME_WS,
   }[motor]
 
@@ -231,7 +229,7 @@ function tabela(resultados) {
 }
 
 ;(async () => {
-  const motores = (process.env.MOTORES ?? 'normal,pgo,chromium').split(',').map((m) => m.trim())
+  const motores = (process.env.MOTORES ?? 'motor,chromium').split(',').map((m) => m.trim())
   console.error(
     `bench: ${ITERACOES} iterações (+${AQUECIMENTO} de aquecimento) por documento\n`
   )
