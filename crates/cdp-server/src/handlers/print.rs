@@ -33,10 +33,9 @@ fn print_to_pdf(session: &mut Session, cmd: &Command) -> Vec<Output> {
     }
 }
 
-fn build_pdf(session: &Session, cmd: &Command) -> Vec<u8> {
+fn build_pdf(session: &mut Session, cmd: &Command) -> Vec<u8> {
     let geo = crate::print_params::geometry_from_print_params(&cmd.params);
-    let html = session.page(&cmd.session).html();
-    let dl = render_core::render_html(&html, geo.content_width());
+    let dl = session.page_mut(&cmd.session).layout(geo.content_width());
     let pages = paginate::paginate(&dl, None, None, &geo);
     pdf_out::render_pdf(&pages, &dl.fonts, &geo)
 }

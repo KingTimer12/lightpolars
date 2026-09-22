@@ -29,9 +29,9 @@ pub fn handle(session: &mut Session, cmd: &Command) -> Vec<Output> {
 
 /// Puppeteer uses this to build the clip of a full-page screenshot; returning
 /// zeros would make the image come out empty.
-fn layout_metrics(session: &Session, cmd: &Command) -> Vec<Output> {
+fn layout_metrics(session: &mut Session, cmd: &Command) -> Vec<Output> {
     let page = session.page(&cmd.session);
-    let dl = render_core::render_html(&page.html(), page.viewport_width);
+    let dl = session.page_mut(&cmd.session).layout(page.viewport_width);
     let height = dl.content_height().max(page.viewport_height);
 
     let content = json!({ "x": 0, "y": 0, "width": page.viewport_width, "height": height });
@@ -72,7 +72,7 @@ fn set_device_metrics(session: &mut Session, cmd: &Command) -> Vec<Output> {
 
 /// Draws the page as an image. Returns `Err` with the CDP error message when
 /// the requested format is not supported.
-fn capture(session: &Session, cmd: &Command) -> Result<Vec<u8>, String> {
+fn capture(session: &mut Session, cmd: &Command) -> Result<Vec<u8>, String> {
     let format = cmd.string("format").unwrap_or("png").to_ascii_lowercase();
     if format != "png" && format != "jpeg" && format != "jpg" {
         return Err(format!(
@@ -81,7 +81,7 @@ fn capture(session: &Session, cmd: &Command) -> Result<Vec<u8>, String> {
     }
 
     let state = session.page(&cmd.session);
-    let dl = render_core::render_html(&state.html(), state.viewport_width);
+    let dl = session.page_mut(&cmd.session).layout(state.viewport_width);
     let (page, geo, scale) = frame_to_draw(cmd, &state, &dl);
 
     let bytes = if format == "png" {

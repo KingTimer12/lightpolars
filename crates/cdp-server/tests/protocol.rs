@@ -397,6 +397,69 @@ fn layout_metrics_report_the_real_content_height() {
     assert_eq!(r[0]["result"]["cssLayoutViewport"]["clientWidth"], 800.0);
 }
 
+// --- layout cache ---
+//
+// The display list is cached per page and width so that a screenshot does not
+// lay the same document out twice (getLayoutMetrics then captureScreenshot).
+// These tests pin the invalidation, which is where a cache goes wrong.
+
+#[test]
+fn new_content_is_not_served_from_the_previous_layout() {
+    let mut s = with_html(r#"<div style="height:2000px"></div>"#);
+    let antes = png_size(&screenshot(&mut s, json!({ "captureBeyondViewport": true })));
+
+    send(&mut s, 2, "Page.setDocumentContent", json!({ "html": r#"<div style="height:500px"></div>"# }));
+    let depois = png_size(&screenshot(&mut s, json!({ "captureBeyondViewport": true })));
+
+    assert!(antes.1 >= 2000, "o primeiro documento saiu com {}px", antes.1);
+    assert!(
+        depois.1 < 1000,
+        "o segundo documento saiu com {}px: veio do layout do primeiro",
+        depois.1
+    );
+}
+
+#[test]
+fn layout_metrics_and_screenshot_agree_on_the_same_content() {
+    let mut s = with_html(r#"<div style="height:1234px"></div>"#);
+    let r = responses(&send(&mut s, 5, "Page.getLayoutMetrics", json!({})));
+    let metrica = r[0]["result"]["cssContentSize"]["height"].as_f64().unwrap();
+    let (_, imagem) = png_size(&screenshot(&mut s, json!({ "captureBeyondViewport": true })));
+    assert_eq!(metrica as u32, imagem, "a métrica e a imagem divergiram");
+}
+
+#[test]
+fn a_new_viewport_width_lays_out_again() {
+    let mut s = with_html("<p>oi</p>");
+    assert_eq!(png_size(&screenshot(&mut s, json!({}))).0, 800);
+
+    send(
+        &mut s,
+        2,
+        "Emulation.setDeviceMetricsOverride",
+        json!({ "width": 400, "height": 300, "deviceScaleFactor": 1 }),
+    );
+    assert_eq!(
+        png_size(&screenshot(&mut s, json!({}))).0,
+        400,
+        "a largura nova não chegou ao layout"
+    );
+}
+
+#[test]
+fn the_pdf_and_the_screenshot_do_not_evict_each_other() {
+    // Larguras diferentes (folha menos margens contra viewport), alternadas: um
+    // cache de uma entrada só serviria o documento na largura errada.
+    let mut s = with_html("<p>oi</p>");
+    for _ in 0..3 {
+        let r = responses(&send(&mut s, 1, "Page.printToPDF", json!({})));
+        let data = r[0]["result"]["data"].as_str().unwrap();
+        let pdf = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+        assert_eq!(&pdf[..5], b"%PDF-");
+        assert_eq!(png_size(&screenshot(&mut s, json!({}))), (800, 600));
+    }
+}
+
 // --- runtime stubs ---
 
 #[test]

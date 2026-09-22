@@ -24,7 +24,9 @@ pub fn handle(session: &mut Session, cmd: &Command) -> Vec<Output> {
 }
 
 fn set_document_content(session: &mut Session, cmd: &Command) -> Vec<Output> {
-    session.page_mut(&cmd.session).html = cmd.string("html").map(str::to_string);
+    session
+        .page_mut(&cmd.session)
+        .set_html(cmd.string("html").map(str::to_string));
     let frame_id = session.page(&cmd.session).frame_id;
 
     // The events go out before the response: Puppeteer's LifecycleWatcher only
