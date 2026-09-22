@@ -6,8 +6,24 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+  # Cada arquitetura compila no seu próprio runner, nativo. A alternativa seria
+  # emular com QEMU num runner só, mas compilar Rust com LTO fat emulado leva
+  # horas e arrisca o teto de 6h.
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+
+    env:
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars
 
     steps:
       - name: Check out the code
@@ -22,14 +38,71 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image
+      # Publicada por digest, sem tag: a tag só aparece no manifesto que o job
+      # `merge` monta com as duas. Marcar aqui faria cada arquitetura sobrescrever
+      # a outra em `latest`, que é exatamente o bug que estamos corrigindo.
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars:${{ github.sha }}
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      # O digest vira o nome de um arquivo vazio; o job de merge só precisa da
+      # lista deles. Via env, e não interpolado no script, que é a forma segura
+      # de levar um valor de expressão para dentro do shell.
+      - name: Export the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: build
+
+    env:
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/lightpolars
+
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create the multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:latest" \
+            --tag "$IMAGE:$SHA" \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - name: Check the published manifest
+        run: docker buildx imagetools inspect "$IMAGE:latest"
