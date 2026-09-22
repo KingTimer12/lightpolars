@@ -11,6 +11,12 @@
 use cdp_server::session::{Output, Session};
 use serde_json::json;
 
+// O mesmo alocador do binário: o perfil de PGO precisa ver o caminho de
+// alocação que roda em produção, senão otimiza o malloc errado.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+
 fn main() {
     let iterations: usize = std::env::args()
         .nth(1)

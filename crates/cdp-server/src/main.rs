@@ -3,6 +3,11 @@
 
 use cdp_server::session::{Output, Session};
 use futures_util::{SinkExt, StreamExt};
+
+// Só no binário: uma lib não tem por que impor o alocador de quem a usa.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
