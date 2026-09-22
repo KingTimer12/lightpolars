@@ -105,10 +105,43 @@ confiável. Vale tanto para `<img>` quanto para folhas de estilo e fontes.
 - No screenshot o texto é rasterizado, não selecionável — é uma imagem. Para
   texto selecionável, use `page.pdf()`.
 
+## Desempenho
+
+Comparado ao Chromium headless pelo mesmo cliente (`puppeteer-core`) e com o
+mesmo HTML — a diferença medida vem do motor, não do driver. Cada iteração faz
+`setContent`, `page.pdf()` e `page.screenshot({ fullPage: true })`.
+
+| documento | motor p50 | chromium p50 | motor cpu/doc | chromium cpu/doc | motor RSS | chromium RSS |
+|---|---|---|---|---|---|---|
+| texto-pesado | 36.9 ms | 145.3 ms | 35 ms | 104 ms | 79 MB | 842 MB |
+| graficos | 37.2 ms | 84.9 ms | 36 ms | 54.5 ms | 80 MB | 802 MB |
+| tabelas | 24.5 ms | 84.8 ms | 24 ms | 48.5 ms | 80 MB | 874 MB |
+
+Entre 2.3x e 3.9x mais rápido, com ~1/3 do tempo de CPU por documento e ~1/10
+da memória. O motor é um processo; o Chromium abre de 7 a 9.
+
+Medido em Apple M4, 10 núcleos, macOS 15.7.3, contra Chrome 153 e
+puppeteer-core 25.11, no commit `6fbdb14`, 20 iterações por documento após 3 de
+aquecimento.
+
+Como ler estes números:
+
+- O `p50` do motor varia ~2% entre execuções; o do Chromium chega a variar 35%,
+  porque ele distribui o trabalho entre processos e o resultado depende de quem
+  mais está na máquina. **A razão entre os dois é a grandeza mais ruidosa da
+  tabela** — para acompanhar regressões, use o `p50` absoluto do motor.
+- `RSS` do Chromium soma a árvore de processos, então conta memória
+  compartilhada mais de uma vez: o número real dele é menor que o da tabela. O
+  do motor, processo único, é exato.
+- O benchmark local compila com `target-cpu=native`; a imagem Docker fixa
+  `x86-64-v3`. O número local é o teto, não o de produção.
+
+Para reproduzir, e para o que cada coluna significa, veja `tests/bench/README.md`.
+
 ## Testes
 
 ```bash
-cargo test --workspace          # 112 testes de unidade/integração
+cargo test --workspace          # 152 testes de unidade/integração
 ```
 
 Aceitação ponta a ponta com Puppeteer real, em `tests/aceitacao/`:
@@ -126,6 +159,12 @@ node tests/aceitacao/smoke.js
 # de page.pdf (não versionados, veja tests/aceitacao/README.md):
 node tests/aceitacao/gerar_goldens.js
 node tests/aceitacao/rodar.js
+```
+
+Benchmark contra o Chromium, em `tests/bench/` (sobe o motor, mede e derruba):
+
+```bash
+tests/bench/rodar.sh
 ```
 
 ## Documentação
