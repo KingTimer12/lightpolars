@@ -3,6 +3,8 @@
 use crate::premultiply;
 use paginate::{Page, Painted};
 use render_ir::{BoxItem, ImageItem, PathCmd, Rect};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use tiny_skia::{
     FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PremultipliedColorU8,
     Rect as SkRect, SpreadMode, Stroke, Transform,
@@ -10,10 +12,20 @@ use tiny_skia::{
 
 /// Boxes and bitmaps, in document paint order — see `paginate::Page::painted`.
 pub fn draw_background(pixmap: &mut Pixmap, page: &Page, scale: f32) {
+    // One document usually draws the same decoded bitmap many times (a logo in
+    // a repeated header, an icon in every row), and blitz hands all of those
+    // items the same `Arc`. Premultiplying is per source pixel, so without this
+    // it is paid once per placement.
+    //
+    // Keyed by the address of the shared buffer, which is stable for as long as
+    // the `Page` borrow holds those `Arc`s alive — that is the whole of this
+    // call.
+    let mut premultiplied: HashMap<usize, Pixmap> = HashMap::new();
+
     for item in page.painted() {
         match item {
             Painted::Box(b) => draw_box(pixmap, b, scale),
-            Painted::Image(img) => draw_image(pixmap, img, scale),
+            Painted::Image(img) => draw_image(pixmap, img, scale, &mut premultiplied),
         }
     }
 }
@@ -121,25 +133,38 @@ fn stroke_rect(pixmap: &mut Pixmap, r: Rect, width: f32, scale: f32, c: tiny_ski
 /// The display-list bitmap is straight RGBA8; `tiny-skia` is premultiplied.
 /// Converting here is the inverse of what `render-core` does when it
 /// rasterizes SVG.
-fn draw_image(target: &mut Pixmap, img: &ImageItem, scale: f32) {
+fn draw_image(
+    target: &mut Pixmap,
+    img: &ImageItem,
+    scale: f32,
+    premultiplied: &mut HashMap<usize, Pixmap>,
+) {
     if img.width_px == 0 || img.height_px == 0 {
         return;
     }
     if img.rgba.len() != img.width_px as usize * img.height_px as usize * 4 {
         return;
     }
-    let Some(mut source) = Pixmap::new(img.width_px, img.height_px) else {
-        return;
+
+    let chave = std::sync::Arc::as_ptr(&img.rgba) as usize;
+    let source = match premultiplied.entry(chave) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => {
+            let Some(mut source) = Pixmap::new(img.width_px, img.height_px) else {
+                return;
+            };
+            for (dst, src) in source.pixels_mut().iter_mut().zip(img.rgba.chunks_exact(4)) {
+                *dst = PremultipliedColorU8::from_rgba(
+                    premultiply(src[0], src[3]),
+                    premultiply(src[1], src[3]),
+                    premultiply(src[2], src[3]),
+                    src[3],
+                )
+                .unwrap_or_else(|| PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
+            }
+            e.insert(source)
+        }
     };
-    for (dst, src) in source.pixels_mut().iter_mut().zip(img.rgba.chunks_exact(4)) {
-        *dst = PremultipliedColorU8::from_rgba(
-            premultiply(src[0], src[3]),
-            premultiply(src[1], src[3]),
-            premultiply(src[2], src[3]),
-            src[3],
-        )
-        .unwrap_or_else(|| PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
-    }
 
     let target_width = img.rect.width * scale;
     let target_height = img.rect.height * scale;

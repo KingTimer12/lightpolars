@@ -153,6 +153,33 @@ fn the_generated_png_has_a_valid_signature() {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
 }
 
+/// The PNG is encoded straight from the pixmap buffer instead of through
+/// `Pixmap::encode_png`, to avoid a full copy of the canvas. This pins that the
+/// pixels that come back are the drawn ones, demultiplied — the part a
+/// signature check would not notice.
+#[test]
+fn the_generated_png_carries_the_drawn_pixels() {
+    let page = box_page(Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 }, [10, 120, 250]);
+    let desenhado = render_pixmap(&page, &[], &geo(20.0, 20.0), 1.0).unwrap();
+    let bytes = render_png(&page, &[], &geo(20.0, 20.0), 1.0).unwrap();
+
+    let decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+    let mut leitor = decoder.read_info().unwrap();
+    let mut pixels = vec![0; leitor.output_buffer_size()];
+    let info = leitor.next_frame(&mut pixels).unwrap();
+
+    assert_eq!((info.width, info.height), (20, 20));
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    for (x, y) in [(5, 5), (15, 15), (0, 0)] {
+        let i = ((y * info.width + x) * 4) as usize;
+        assert_eq!(
+            &pixels[i..i + 4],
+            pixel(&desenhado, x, y),
+            "o pixel {x},{y} do PNG não bate com o desenhado"
+        );
+    }
+}
+
 #[test]
 fn the_generated_jpeg_has_a_valid_marker() {
     let bytes = render_jpeg(&Page::default(), &[], &geo(10.0, 10.0), 1.0, 80).unwrap();

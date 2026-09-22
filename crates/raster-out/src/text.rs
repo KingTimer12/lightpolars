@@ -8,33 +8,60 @@ use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Format, Vector};
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
+/// Draws every run, building one scaler per stretch of consecutive runs that
+/// share a font and a size.
+///
+/// Building a scaler parses the font tables again, and a text-heavy document is
+/// hundreds of runs that almost all share the same face and size — a paragraph
+/// is one run per line. Grouping only *consecutive* runs (rather than sorting
+/// by font) keeps the painting order exactly as it was, which matters wherever
+/// two runs overlap.
 pub fn draw_texts(pixmap: &mut Pixmap, page: &Page, fonts: &[FontResource], scale: f32) {
     let mut ctx = ScaleContext::new();
-    for run in &page.texts {
-        draw_run(pixmap, &mut ctx, run, fonts, scale);
+    let runs = &page.texts;
+    let mut start = 0;
+
+    while start < runs.len() {
+        let key = |r: &TextRun| (r.font_index, r.font_size_px.to_bits());
+        let mut end = start + 1;
+        while end < runs.len() && key(&runs[end]) == key(&runs[start]) {
+            end += 1;
+        }
+        draw_group(pixmap, &mut ctx, &runs[start..end], fonts, scale);
+        start = end;
     }
 }
 
-fn draw_run(
+/// Runs sharing one font and one size, so one scaler serves all of them.
+fn draw_group(
     pixmap: &mut Pixmap,
     ctx: &mut ScaleContext,
-    run: &TextRun,
+    runs: &[TextRun],
     fonts: &[FontResource],
     scale: f32,
 ) {
-    let Some(resource) = fonts.get(run.font_index) else {
+    let Some(first) = runs.first() else {
+        return;
+    };
+    let Some(resource) = fonts.get(first.font_index) else {
         return;
     };
     let Some(font) = FontRef::from_index(&resource.bytes, resource.face_index) else {
         return;
     };
 
-    let size = run.font_size_px * scale;
+    let size = first.font_size_px * scale;
     if !size.is_finite() || size <= 0.0 {
         return;
     }
     let mut scaler = ctx.builder(font).size(size).hint(false).build();
 
+    for run in runs {
+        draw_run(pixmap, &mut scaler, run, scale);
+    }
+}
+
+fn draw_run(pixmap: &mut Pixmap, scaler: &mut swash::scale::Scaler, run: &TextRun, scale: f32) {
     for g in &run.glyphs {
         let x = (run.origin_x + g.x) * scale;
         let y = (run.baseline_y + g.y) * scale;
@@ -48,7 +75,7 @@ fn draw_run(
         ])
         .format(Format::Alpha)
         .offset(Vector::new(x - xi, y - yi))
-        .render(&mut scaler, g.id)
+        .render(scaler, g.id)
         else {
             continue;
         };
