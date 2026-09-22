@@ -1,8 +1,8 @@
-//! Resolução de recursos referenciados pelo HTML.
+//! Resolution of resources referenced by the HTML.
 //!
-//! REGRA DE SEGURANÇA: só `data:` é aceito. O HTML processado por este motor é
-//! não confiável (em helpers/_pdf.js ele é gerado por IA). Qualquer outro esquema
-//! resolve como ausente, e nenhuma função deste módulo abre socket ou arquivo.
+//! SECURITY RULE: only `data:` is accepted. The HTML this engine processes is
+//! untrusted (in helpers/_pdf.js it is AI-generated). Any other scheme resolves
+//! as absent, and no function in this module opens a socket or a file.
 
 use base64::Engine as _;
 
@@ -36,20 +36,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodifica_data_uri_base64() {
-        // "Oi" em base64 é "T2k="
+    fn decodes_base64_data_uri() {
+        // "Oi" in base64 is "T2k="
         let out = resolve_data_uri("data:text/plain;base64,T2k=").unwrap();
         assert_eq!(out, b"Oi");
     }
 
     #[test]
-    fn decodifica_data_uri_sem_base64() {
+    fn decodes_data_uri_without_base64() {
         let out = resolve_data_uri("data:text/plain,Oi").unwrap();
         assert_eq!(out, b"Oi");
     }
 
     #[test]
-    fn recusa_http_https_e_file() {
+    fn rejects_http_https_and_file() {
         assert!(resolve_data_uri("http://exemplo.com/a.png").is_none());
         assert!(resolve_data_uri("https://exemplo.com/a.png").is_none());
         assert!(resolve_data_uri("file:///etc/passwd").is_none());
@@ -58,25 +58,25 @@ mod tests {
     }
 
     #[test]
-    fn recusa_data_com_maiusculas_disfarcando_outro_esquema() {
-        // Não deve ser confundido com data:
+    fn uppercase_does_not_disguise_another_scheme() {
+        // Must not be mistaken for data:
         assert!(resolve_data_uri("javascript:alert(1)").is_none());
-        // data: legítimo em caixa alta continua válido
+        // A legitimate data: in upper case stays valid
         assert!(resolve_data_uri("DATA:text/plain,Oi").is_some());
     }
 
     #[test]
-    fn base64_invalido_retorna_none_em_vez_de_panicar() {
-        assert!(resolve_data_uri("data:image/png;base64,!!!não-é-base64!!!").is_none());
+    fn invalid_base64_returns_none_instead_of_panicking() {
+        assert!(resolve_data_uri("data:image/png;base64,!!!not-base64!!!").is_none());
     }
 
     #[test]
-    fn entrada_multibyte_nao_panica() {
-        // "é" ocupa os bytes 4 e 5, então um corte em 5 cairia no meio do caractere.
+    fn multibyte_input_does_not_panic() {
+        // "é" takes bytes 4 and 5, so cutting at 5 would land mid-character.
         assert!(resolve_data_uri("aaaaé").is_none());
         assert!(resolve_data_uri("é").is_none());
         assert!(resolve_data_uri("dataé").is_none());
-        // data: legítimo seguido de conteúdo multibyte continua funcionando
+        // A legitimate data: followed by multibyte content keeps working
         assert_eq!(resolve_data_uri("data:text/plain,ação").unwrap(), "ação".as_bytes());
     }
 }

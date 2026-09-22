@@ -1,87 +1,114 @@
-//! Dá layout ao HTML com o blitz e extrai uma display list própria.
-//! Esta é a única crate que conhece os tipos do blitz — a fronteira existe para
-//! que trocar o miolo de layout não se propague para paginate e pdf-out.
+//! Lays HTML out with blitz and extracts our own display list.
+//! This is the only crate that knows blitz types — the boundary exists so that
+//! swapping the layout engine does not leak into paginate, pdf-out or
+//! raster-out.
 //!
-//! **Pressupõe `scale = 1.0`.** O `parley` trabalha em px de dispositivo e o
-//! blitz divide as medidas pelo `scale` ao montar o layout
-//! (`blitz-dom/src/layout/inline.rs`). Como o viewport é criado com escala 1.0,
-//! px de dispositivo e px CSS coincidem e a extração pode misturar as duas
-//! fontes de coordenada sem conversão. Mudar a escala exige revisar isto.
+//! **Assumes `scale = 1.0`.** `parley` works in device px and blitz divides
+//! measurements by the scale when building the layout
+//! (`blitz-dom/src/layout/inline.rs`). Since the viewport is created at scale
+//! 1.0, device px and CSS px coincide and the extraction can mix the two
+//! coordinate sources without converting. Changing the scale requires revisiting
+//! this.
 
-use crate::net::{ColetorDeRecursos, ProvedorDataUri};
+use crate::net::{DataUriProvider, ResourceCollector};
+use crate::style::{background_color, box_border, brush_color, corner_radii};
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
-use render_ir::{BoxItem, DisplayList, FontResource, Glyph, ImageItem, Rect, TextRun};
+use render_ir::{BoxItem, DisplayList, FontBytes, FontResource, Glyph, ImageItem, Rect, TextRun};
 use std::sync::Arc;
-use style::properties::ComputedValues;
 
-/// Altura inicial do viewport de layout. O documento é contínuo: a altura real
-/// sai de `DisplayList::content_height`, e o corte em páginas é de `paginate`.
-const ALTURA_INICIAL_PX: u32 = 20_000;
+/// Initial layout viewport height. The document is continuous: the real height
+/// comes from `DisplayList::content_height`, and page slicing is paginate's job.
+const INITIAL_HEIGHT_PX: u32 = 20_000;
 
-/// Teto rígido para o crescimento do viewport. Alcançá-lo é um erro de projeto,
-/// não um caso normal — por isso é avisado em `stderr` em vez de truncar calado.
-const ALTURA_MAXIMA_PX: u32 = 400_000;
+/// Hard cap on viewport growth. Reaching it is a design error, not a normal
+/// case — hence the warning on `stderr` instead of a silent truncation.
+const MAX_HEIGHT_PX: u32 = 400_000;
 
 pub fn render_html(html: &str, width_px: f32) -> DisplayList {
-    // O viewport é inteiro: arredondar (e não truncar) evita perder a última
-    // coluna de px em larguras como 595.28 (A4). O mínimo de 1 também absorve
-    // largura negativa ou NaN, que saturariam em 0.
-    let largura_viewport = width_px.round().max(1.0) as u32;
+    // The viewport is an integer: rounding (rather than truncating) avoids
+    // losing the last column of px at widths like 595.28 (A4). The minimum of 1
+    // also absorbs a negative or NaN width, which would saturate to 0.
+    let viewport_width = width_px.round().max(1.0) as u32;
 
-    let mut altura = ALTURA_INICIAL_PX;
+    // blitz only understands SVG that arrives as a resource; an `<svg>` written
+    // in the HTML becomes an empty box. The rewrite normalizes that before the
+    // parse.
+    let html = &crate::svg::inline_svg_to_img(html);
+
+    // Parsed once and laid out as many times as the height search needs: the
+    // parse and the resource decode do not depend on the viewport, and redoing
+    // them per attempt used to double the cost of any document taller than the
+    // initial guess.
+    let (mut doc, collector) = build_document(html);
+
+    let mut height = INITIAL_HEIGHT_PX;
     loop {
-        let (dl, altura_usada) = layout_e_extrai(html, width_px, largura_viewport, altura);
+        let (dl, used_height) =
+            layout_and_extract(&mut doc, &collector, width_px, viewport_width, height);
 
-        if altura_usada <= altura as f32 {
+        if used_height <= height as f32 {
             return dl;
         }
-        if altura >= ALTURA_MAXIMA_PX {
+        if height >= MAX_HEIGHT_PX {
             eprintln!(
-                "render-core: conteúdo de {altura_usada:.0}px excede o teto de \
-                 layout de {ALTURA_MAXIMA_PX}px; o excedente foi truncado"
+                "render-core: content of {used_height:.0}px exceeds the layout cap \
+                 of {MAX_HEIGHT_PX}px; the excess was truncated"
             );
             return dl;
         }
-        altura = altura.saturating_mul(2).min(ALTURA_MAXIMA_PX);
+        height = height.saturating_mul(2).min(MAX_HEIGHT_PX);
     }
 }
 
-/// Dá um layout com a altura de viewport pedida e devolve a display list junto
-/// da altura que o conteúdo realmente ocupou (base para decidir se cresce).
-fn layout_e_extrai(
-    html: &str,
-    width_px: f32,
-    largura_viewport: u32,
-    altura_viewport: u32,
-) -> (DisplayList, f32) {
-    // O provedor resolve `data:` de forma síncrona e recusa qualquer outro
-    // esquema; o coletor guarda o que foi resolvido para aplicarmos abaixo.
-    let coletor = Arc::new(ColetorDeRecursos::default());
+/// Parses the HTML and registers the fonts it declares, without laying out.
+fn build_document(html: &str) -> (HtmlDocument, Arc<ResourceCollector>) {
+    // The provider resolves `data:` synchronously and refuses any other scheme;
+    // the collector holds what was resolved so we can apply it below.
+    let collector = Arc::new(ResourceCollector::default());
     let mut doc = HtmlDocument::from_html(
         html,
         DocumentConfig {
-            net_provider: Some(Arc::new(ProvedorDataUri::new(coletor.clone()))),
+            net_provider: Some(Arc::new(DataUriProvider::new(collector.clone()))),
             ..Default::default()
         },
     );
+    // blitz never fetches an @font-face declared in an inline <style>, so the
+    // faces are registered by hand before the first layout (see fonts.rs).
+    for bytes in crate::fonts::inline_font_faces(html) {
+        doc.load_resource(blitz_dom::net::Resource::Font(
+            blitz_traits::net::Bytes::from(bytes),
+        ));
+    }
+    (doc, collector)
+}
+
+/// Lays out at the requested viewport height and returns the display list plus
+/// the height the content actually took (the basis for deciding to grow).
+fn layout_and_extract(
+    doc: &mut HtmlDocument,
+    collector: &Arc<ResourceCollector>,
+    width_px: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> (DisplayList, f32) {
     doc.set_viewport(Viewport::new(
-        largura_viewport,
-        altura_viewport,
+        viewport_width,
+        viewport_height,
         1.0,
         ColorScheme::Light,
     ));
     doc.resolve(0.0);
 
-    // As imagens só existem depois que o recurso entra no documento, e isso
-    // invalida o layout — daí o segundo resolve.
-    let recursos = coletor.drenar();
-    let havia_recursos = !recursos.is_empty();
-    for recurso in recursos {
-        doc.load_resource(recurso);
+    // Images only exist once the resource enters the document, and that
+    // invalidates the layout — hence the second resolve.
+    let resources = collector.drain();
+    let had_resources = !resources.is_empty();
+    for resource in resources {
+        doc.load_resource(resource);
     }
-    if havia_recursos {
+    if had_resources {
         doc.resolve(0.0);
     }
 
@@ -89,13 +116,18 @@ fn layout_e_extrai(
         width: width_px,
         ..Default::default()
     };
-    let mut fontes: Vec<FontResource> = Vec::new();
+    let mut fonts: Vec<FontResource> = Vec::new();
+    // Blob id -> index in `fonts`, the fast path of `intern_font`.
+    let mut seen_fonts: Vec<((u64, usize), usize)> = Vec::new();
+    // Document paint order, shared by boxes and images so the renderers can
+    // interleave them (see `render_ir::ImageItem::order`).
+    let mut order = PaintOrder::default();
 
     let tree = doc.tree();
 
     for (_id, node) in tree.iter() {
-        // `final_layout.location` é relativo ao pai; a display list é em
-        // coordenadas do documento.
+        // `final_layout.location` is relative to the parent; the display list is
+        // in document coordinates.
         let pos = node.absolute_position(0.0, 0.0);
         let layout = &node.final_layout;
         let (x, y) = (pos.x, pos.y);
@@ -104,50 +136,49 @@ fn layout_e_extrai(
             continue;
         };
 
-        let estilo = node.primary_styles();
-        if let Some(s) = estilo.as_deref() {
-            let fundo = cor_de_fundo(s);
-            let (borda_cor, borda_largura) = borda_da_caixa(s);
+        let node_box = Rect {
+            x,
+            y,
+            width: layout.size.width,
+            height: layout.size.height,
+        };
 
-            // Um nó sem fundo visível e sem borda não pinta nada: emitir uma
-            // caixa aqui encheria a lista de `<html>`, `<head>` e `<style>`.
-            if fundo.is_some() || borda_largura > 0.0 {
+        if let Some(s) = node.primary_styles().as_deref() {
+            let background = background_color(s);
+            let (border_color, border_width) = box_border(s);
+
+            // A node with no visible background and no border paints nothing:
+            // emitting a box here would fill the list with `<html>`, `<head>`
+            // and `<style>`.
+            if background.is_some() || border_width > 0.0 {
                 dl.boxes.push(BoxItem {
-                    rect: Rect {
-                        x,
-                        y,
-                        width: layout.size.width,
-                        height: layout.size.height,
-                    },
-                    background: fundo,
-                    border_color: borda_cor,
-                    border_width: borda_largura,
+                    rect: node_box,
+                    background,
+                    border_color,
+                    border_width,
+                    radii: corner_radii(s, node_box.width, node_box.height),
+                    order: order.take(),
                 });
             }
+
+            // `background-image` layers paint over the background colour of
+            // the same element and under its content.
+            dl.images
+                .extend(crate::background::extract(el, s, node_box, &mut order));
         }
 
-        if let Some(raster) = el.raster_image_data() {
-            dl.images.push(ImageItem {
-                rect: Rect {
-                    x,
-                    y,
-                    width: layout.size.width,
-                    height: layout.size.height,
-                },
-                width_px: raster.width,
-                height_px: raster.height,
-                rgba: raster.data.clone(),
-            });
+        if let Some(image) = extract_image(el, node_box, order.take()) {
+            dl.images.push(image);
         }
 
         let Some(text_layout) = el.inline_layout_data.as_ref() else {
             continue;
         };
 
-        // O layout do parley é ancorado no content box; `absolute_position` dá o
-        // border box. O mesmo ajuste que o blitz faz em `Node::hit`.
-        let texto_x = x + layout.padding.left + layout.border.left;
-        let texto_y = y + layout.padding.top + layout.border.top;
+        // The parley layout is anchored at the content box; `absolute_position`
+        // gives the border box. Same adjustment blitz makes in `Node::hit`.
+        let text_x = x + layout.padding.left + layout.border.left;
+        let text_y = y + layout.padding.top + layout.border.top;
 
         for line in text_layout.layout.lines() {
             for item in line.items() {
@@ -155,169 +186,182 @@ fn layout_e_extrai(
                     continue;
                 };
                 let run = glyph_run.run();
-                let font_index = indice_da_fonte(&mut fontes, run.font());
-                let tamanho = run.font_size();
+                let font_index = intern_font(&mut fonts, &mut seen_fonts, run.font());
+                let size = run.font_size();
 
-                let deslocamento = glyph_run.offset();
+                let offset = glyph_run.offset();
                 let baseline = glyph_run.baseline();
 
-                // `glyphs()` devolve só o offset do shaper, sem acumular
-                // `advance` — todos os glifos cairiam na mesma abscissa.
-                // `positioned_glyphs()` acumula, mas já soma `offset`/`baseline`
-                // do run; descontamos os dois para manter o contrato do
-                // `render_ir::Glyph` (posição relativa à origem do run) sem
-                // contar duas vezes.
-                let glifos: Vec<Glyph> = glyph_run
+                // `glyphs()` yields only the shaper offset, without accumulating
+                // `advance` — every glyph would land on the same x.
+                // `positioned_glyphs()` accumulates, but already adds the run's
+                // `offset`/`baseline`; we subtract both to honour the
+                // `render_ir::Glyph` contract (position relative to the run
+                // origin) without counting them twice.
+                let glyphs: Vec<Glyph> = glyph_run
                     .positioned_glyphs()
                     .map(|g| Glyph {
                         id: g.id as u16,
-                        x: g.x - deslocamento,
+                        x: g.x - offset,
                         y: g.y - baseline,
                     })
                     .collect();
-                if glifos.is_empty() {
+                if glyphs.is_empty() {
                     continue;
                 }
 
-                let faixa = run.text_range();
-                let fatia = text_layout.text.get(faixa.start..faixa.end);
+                let range = run.text_range();
+                let slice = text_layout.text.get(range.start..range.end);
                 debug_assert!(
-                    fatia.is_some(),
-                    "text_range {faixa:?} fora de char boundary do texto do nó; \
-                     o ToUnicode do PDF ficaria vazio sem aviso"
+                    slice.is_some(),
+                    "text_range {range:?} outside a char boundary of the node text; \
+                     the PDF ToUnicode would silently come out empty"
                 );
 
                 dl.texts.push(TextRun {
-                    origin_x: texto_x + deslocamento,
-                    baseline_y: texto_y + baseline,
+                    origin_x: text_x + offset,
+                    baseline_y: text_y + baseline,
                     font_index,
-                    font_size_px: tamanho,
-                    color: cor_do_brush(tree, glyph_run.style().brush.id),
-                    glyphs: glifos,
-                    text: fatia.unwrap_or_default().to_string(),
+                    font_size_px: size,
+                    color: brush_color(tree, glyph_run.style().brush.id),
+                    glyphs,
+                    text: slice.unwrap_or_default().to_string(),
                 });
             }
         }
     }
 
-    dl.fonts = fontes;
+    dl.fonts = fonts;
 
-    let raiz = doc.root_element().final_layout;
-    let altura_usada = raiz
-        .size
-        .height
-        .max(raiz.content_size.height)
-        .max(dl.content_height());
+    let root = doc.root_element().final_layout;
+    // The root knows the height the layout reserved; the display list only knows
+    // what was painted. Keeping both lets a screenshot see deliberate whitespace
+    // without pagination losing content drawn outside the root.
+    dl.layout_height = root.size.height.max(root.content_size.height);
+    let used_height = dl.content_height();
 
-    (dl, altura_usada)
+    (dl, used_height)
 }
 
-/// Guarda a fonte uma única vez e devolve seu índice em `DisplayList::fonts`.
-fn indice_da_fonte(fontes: &mut Vec<FontResource>, font: &parley::FontData) -> usize {
-    let bytes: &[u8] = font.data.as_ref();
-    let face = font.index as usize;
-    if let Some(pos) = fontes
-        .iter()
-        .position(|f| f.face_index == face && f.bytes.len() == bytes.len() && f.bytes == bytes)
-    {
-        return pos;
+/// The image drawn by this element, raster or SVG, already sized to its box.
+fn extract_image(
+    el: &blitz_dom::node::ElementData,
+    node_box: Rect,
+    order: u32,
+) -> Option<ImageItem> {
+    if let Some(raster) = el.raster_image_data() {
+        return Some(ImageItem {
+            rect: node_box,
+            width_px: raster.width,
+            height_px: raster.height,
+            rgba: raster.data.clone(),
+            order,
+        });
     }
-    fontes.push(FontResource {
-        bytes: bytes.to_vec(),
-        face_index: face,
-    });
-    fontes.len() - 1
+
+    // SVG is vector art, but the rest of the pipeline (paginate, pdf-out,
+    // raster-out) only knows bitmaps: rasterize at the final box size.
+    let tree = el.svg_data()?;
+    let (width, height, rgba) = crate::svg::rasterize(tree, node_box.width, node_box.height)?;
+    Some(ImageItem {
+        rect: node_box,
+        width_px: width,
+        height_px: height,
+        rgba: Arc::new(rgba),
+        order,
+    })
 }
 
-/// Cor de fundo, ou `None` quando não há nada visível para pintar.
+/// Hands out the paint-order numbers, in traversal order.
+#[derive(Default)]
+pub struct PaintOrder(u32);
+
+impl PaintOrder {
+    pub fn take(&mut self) -> u32 {
+        let current = self.0;
+        self.0 += 1;
+        current
+    }
+}
+
+/// Stores the font once and returns its index in `DisplayList::fonts`.
 ///
-/// O valor inicial de `background-color` é `transparent`, que no stylo é a
-/// variante `Absolute` (preto com alfa 0). Ler só os componentes RGB faria todo
-/// elemento virar uma caixa preta opaca.
-fn cor_de_fundo(estilo: &ComputedValues) -> Option<[u8; 3]> {
-    let cor = estilo.get_background().background_color.as_absolute()?;
-    if cor.alpha <= 0.0 {
-        return None;
+/// `seen` maps a blob id to that index. The id is the fast path that matters:
+/// this runs once per glyph run, which is hundreds of times per page, and
+/// identifying the font by comparing the whole file — megabytes — on each of
+/// them was pure waste. Two distinct blobs holding the same file still fall
+/// through to the content comparison, so the table stays deduplicated.
+fn intern_font(
+    fonts: &mut Vec<FontResource>,
+    seen: &mut Vec<((u64, usize), usize)>,
+    font: &parley::FontData,
+) -> usize {
+    let face = font.index as usize;
+    let key = (font.data.id(), face);
+    if let Some((_, pos)) = seen.iter().find(|(k, _)| *k == key) {
+        return *pos;
     }
-    Some(rgb(cor))
-}
 
-/// Cor e largura da borda de topo. `render_ir::BoxItem` só comporta uma borda,
-/// então bordas assimétricas são representadas pela de topo.
-fn borda_da_caixa(estilo: &ComputedValues) -> (Option<[u8; 3]>, f32) {
-    let borda = estilo.get_border();
-    let largura = borda.border_top_width.to_f32_px();
-    if largura <= 0.0 {
-        return (None, 0.0);
-    }
-    // O valor inicial de `border-color` é `currentcolor`, que não é `Absolute`:
-    // resolver pela propriedade `color` do próprio elemento.
-    let cor = borda
-        .border_top_color
-        .as_absolute()
-        .copied()
-        .unwrap_or_else(|| estilo.get_inherited_text().clone_color());
-    (Some(rgb(&cor)), largura)
-}
-
-/// O `TextBrush` do blitz não carrega cor: é o id do nó do span que originou o
-/// run (`blitz-dom/src/node/element.rs`). A cor sai da propriedade `color`
-/// computada desse nó.
-fn cor_do_brush(tree: &slab::Slab<blitz_dom::Node>, id: usize) -> [u8; 3] {
-    tree.get(id)
-        .and_then(|n| n.primary_styles())
-        .map(|s| rgb(&s.get_inherited_text().clone_color()))
-        .unwrap_or([0, 0, 0])
-}
-
-fn rgb(c: &style::color::AbsoluteColor) -> [u8; 3] {
-    let srgb = c.to_color_space(style::color::ColorSpace::Srgb);
-    [
-        (srgb.components.0 * 255.0).round().clamp(0.0, 255.0) as u8,
-        (srgb.components.1 * 255.0).round().clamp(0.0, 255.0) as u8,
-        (srgb.components.2 * 255.0).round().clamp(0.0, 255.0) as u8,
-    ]
+    let bytes: &[u8] = font.data.as_ref();
+    let pos = match fonts
+        .iter()
+        .position(|f| f.face_index == face && f.bytes.len() == bytes.len() && *f.bytes == *bytes)
+    {
+        Some(pos) => pos,
+        None => {
+            // The blob's own allocation, adopted rather than copied: the layout
+            // engine keeps the font alive for as long as we hold this.
+            fonts.push(FontResource {
+                bytes: FontBytes::from_arc(font.data.clone().into_raw_parts().0),
+                face_index: face,
+            });
+            fonts.len() - 1
+        }
+    };
+    seen.push((key, pos));
+    pos
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
-    const HTML_PARAGRAFO: &str = r#"<!DOCTYPE html><html><head><style>
+    const PARAGRAPH_HTML: &str = r#"<!DOCTYPE html><html><head><style>
         body { margin: 0; font-family: Helvetica, Arial, sans-serif; font-size: 16px; }
         </style></head><body><p>Texto de teste</p></body></html>"#;
 
     #[test]
-    fn extrai_glifos_de_um_paragrafo() {
-        let dl = render_html(HTML_PARAGRAFO, 643.0);
+    fn extracts_glyphs_from_a_paragraph() {
+        let dl = render_html(PARAGRAPH_HTML, 643.0);
         let total: usize = dl.texts.iter().map(|t| t.glyphs.len()).sum();
-        assert!(total >= 13, "esperava ao menos um glifo por caractere, veio {total}");
-        assert!(!dl.fonts.is_empty(), "nenhuma fonte coletada");
+        assert!(total >= 13, "expected at least one glyph per character, got {total}");
+        assert!(!dl.fonts.is_empty(), "no font collected");
     }
 
     #[test]
-    fn runs_tem_baseline_positiva_e_dentro_da_largura() {
-        let dl = render_html(HTML_PARAGRAFO, 643.0);
+    fn runs_have_a_positive_baseline_inside_the_width() {
+        let dl = render_html(PARAGRAPH_HTML, 643.0);
         for run in &dl.texts {
-            assert!(run.baseline_y > 0.0, "baseline não posicionada");
+            assert!(run.baseline_y > 0.0, "baseline not placed");
             assert!(run.origin_x >= 0.0 && run.origin_x < 643.0);
-            assert!(run.font_index < dl.fonts.len(), "font_index fora de fonts");
+            assert!(run.font_index < dl.fonts.len(), "font_index outside fonts");
         }
     }
 
     #[test]
-    fn texto_mais_longo_ocupa_mais_altura() {
-        let curto = render_html(HTML_PARAGRAFO, 300.0);
-        let longo_html = HTML_PARAGRAFO.replace(
+    fn longer_text_takes_more_height() {
+        let short = render_html(PARAGRAPH_HTML, 300.0);
+        let long_html = PARAGRAPH_HTML.replace(
             "Texto de teste",
             &"Texto de teste bem mais longo para forçar quebra em várias linhas. ".repeat(10),
         );
-        let longo = render_html(&longo_html, 300.0);
-        assert!(longo.content_height() > curto.content_height());
+        let long = render_html(&long_html, 300.0);
+        assert!(long.content_height() > short.content_height());
     }
 
     #[test]
-    fn celulas_de_tabela_viram_caixas_posicionadas() {
+    fn table_cells_become_positioned_boxes() {
         let html = r#"<!DOCTYPE html><html><head><style>
             body { margin: 0; }
             table { width: 100%; font-size: 10pt; }
@@ -326,42 +370,40 @@ mod tests {
             <tr><td>Alpha</td><td>Beta</td></tr>
             </table></body></html>"#;
         let dl = render_html(html, 600.0);
-        let com_borda: Vec<_> = dl.boxes.iter().filter(|b| b.border_width > 0.0).collect();
-        assert!(com_borda.len() >= 2, "esperava caixas de célula com borda");
-        // As duas células ficam lado a lado, não empilhadas.
-        let xs: Vec<f32> = com_borda.iter().map(|b| b.rect.x).collect();
-        assert!(xs.iter().any(|x| *x > 0.0), "células não foram posicionadas em colunas");
+        let with_border: Vec<_> = dl.boxes.iter().filter(|b| b.border_width > 0.0).collect();
+        assert!(with_border.len() >= 2, "expected cell boxes with borders");
+        // The two cells sit side by side, not stacked.
+        let xs: Vec<f32> = with_border.iter().map(|b| b.rect.x).collect();
+        assert!(xs.iter().any(|x| *x > 0.0), "cells were not laid out in columns");
     }
 
     #[test]
-    fn largura_da_display_list_e_a_largura_pedida() {
-        let dl = render_html(HTML_PARAGRAFO, 500.0);
+    fn display_list_width_is_the_requested_width() {
+        let dl = render_html(PARAGRAPH_HTML, 500.0);
         assert_eq!(dl.width, 500.0);
     }
 
-    // --- Asserções somadas na rodada de correção 1 ---
-
     #[test]
-    fn glifos_de_um_run_avancam_horizontalmente() {
-        let dl = render_html(HTML_PARAGRAFO, 643.0);
-        assert!(!dl.texts.is_empty(), "nenhum run extraído");
+    fn glyphs_in_a_run_advance_horizontally() {
+        let dl = render_html(PARAGRAPH_HTML, 643.0);
+        assert!(!dl.texts.is_empty(), "no run extracted");
         let run = dl
             .texts
             .iter()
             .find(|r| r.glyphs.len() >= 2)
-            .expect("esperava um run com ao menos dois glifos");
-        for par in run.glyphs.windows(2) {
+            .expect("expected a run with at least two glyphs");
+        for pair in run.glyphs.windows(2) {
             assert!(
-                par[1].x > par[0].x,
-                "glifos não avançam: {:?} depois de {:?}",
-                par[1],
-                par[0]
+                pair[1].x > pair[0].x,
+                "glyphs do not advance: {:?} after {:?}",
+                pair[1],
+                pair[0]
             );
         }
     }
 
     #[test]
-    fn posicoes_sao_absolutas_no_documento() {
+    fn positions_are_absolute_in_the_document() {
         let html = r#"<!DOCTYPE html><html><head><style>
             body { margin: 0; font-size: 16px; }
             </style></head><body>
@@ -369,36 +411,36 @@ mod tests {
             </body></html>"#;
         let dl = render_html(html, 600.0);
 
-        let caixa = dl
+        let box_item = dl
             .boxes
             .iter()
             .find(|b| b.background == Some([255, 0, 0]))
-            .expect("esperava a caixa vermelha");
-        assert!(caixa.rect.y >= 495.0, "rect.y={} não é absoluto", caixa.rect.y);
+            .expect("expected the red box");
+        assert!(box_item.rect.y >= 495.0, "rect.y={} is not absolute", box_item.rect.y);
 
-        assert!(!dl.texts.is_empty(), "nenhum run extraído");
+        assert!(!dl.texts.is_empty(), "no run extracted");
         for run in &dl.texts {
             assert!(
                 run.baseline_y >= 495.0,
-                "baseline_y={} não é absoluto",
+                "baseline_y={} is not absolute",
                 run.baseline_y
             );
         }
     }
 
     #[test]
-    fn html_sem_fundo_declarado_nao_gera_caixa_alguma() {
-        let dl = render_html(HTML_PARAGRAFO, 643.0);
+    fn html_without_a_declared_background_emits_no_box() {
+        let dl = render_html(PARAGRAPH_HTML, 643.0);
         assert!(
             dl.boxes.is_empty(),
-            "fundo transparente virou caixa: {:?}",
+            "transparent background became a box: {:?}",
             dl.boxes
         );
-        assert!(!dl.texts.is_empty(), "nenhum run extraído");
+        assert!(!dl.texts.is_empty(), "no run extracted");
     }
 
     #[test]
-    fn head_e_style_nao_viram_caixas_mesmo_com_fundo_no_body() {
+    fn head_and_style_stay_out_even_with_a_body_background() {
         let html = r#"<!DOCTYPE html><html><head><style>
             body { margin: 0; background: #ffffff; }
             </style></head><body><p>Oi</p></body></html>"#;
@@ -406,30 +448,30 @@ mod tests {
         assert_eq!(
             dl.boxes.len(),
             1,
-            "só o body devia pintar, veio {:?}",
+            "only the body should paint, got {:?}",
             dl.boxes
         );
         assert_eq!(dl.boxes[0].background, Some([255, 255, 255]));
     }
 
     #[test]
-    fn cor_do_texto_vem_do_estilo_computado() {
+    fn text_color_comes_from_the_computed_style() {
         let html = r#"<!DOCTYPE html><html><head><style>
             body { margin: 0; font-size: 16px; }
             </style></head><body>
             <p style="color:#ff0000">Vermelho</p>
             </body></html>"#;
         let dl = render_html(html, 600.0);
-        assert!(!dl.texts.is_empty(), "nenhum run extraído");
+        assert!(!dl.texts.is_empty(), "no run extracted");
         assert!(
             dl.texts.iter().any(|r| r.color == [255, 0, 0]),
-            "esperava um run vermelho, veio {:?}",
+            "expected a red run, got {:?}",
             dl.texts.iter().map(|r| r.color).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn viewport_cresce_para_conteudo_alto() {
+    fn the_viewport_grows_for_tall_content() {
         let html = r#"<!DOCTYPE html><html><head><style>
             body { margin: 0; }
             </style></head><body>
@@ -437,48 +479,99 @@ mod tests {
             <div style="height:20px;background:#00ff00">fim</div>
             </body></html>"#;
         let dl = render_html(html, 600.0);
-        let verde = dl
+        let green = dl
             .boxes
             .iter()
             .find(|b| b.background == Some([0, 255, 0]))
-            .expect("a caixa após 30000px sumiu — o viewport não cresceu");
+            .expect("the box after 30000px vanished — the viewport did not grow");
         assert!(
-            verde.rect.y >= 30000.0,
-            "rect.y={} — conteúdo foi truncado pelo viewport inicial",
-            verde.rect.y
+            green.rect.y >= 30000.0,
+            "rect.y={} — content was truncated by the initial viewport",
+            green.rect.y
         );
         assert!(dl.content_height() > 20_000.0);
     }
-    /// PNG 4x2 vermelho, embutido para o teste não depender de fixture binária.
+
+    /// 4x2 red PNG, inlined so the test needs no binary fixture.
     const PNG_4X2: &str = "iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAIAAADwyuo0AAAAEElEQVR4nGM4IScHRwzIHABvCgghBqXSdgAAAABJRU5ErkJggg==";
 
     #[test]
-    fn imagem_data_uri_vira_item_da_display_list() {
+    fn a_data_uri_image_becomes_a_display_list_item() {
         let html = format!(
             r#"<img style="width:80px;height:40px" src="data:image/png;base64,{PNG_4X2}" />"#
         );
         let dl = render_html(&html, 500.0);
-        assert_eq!(dl.images.len(), 1, "a imagem não chegou na display list");
+        assert_eq!(dl.images.len(), 1, "the image did not reach the display list");
         let img = &dl.images[0];
-        assert_eq!((img.width_px, img.height_px), (4, 2), "tamanho do bitmap");
-        assert!((img.rect.width - 80.0).abs() < 1.0, "largura da caixa: {:?}", img.rect);
-        assert!((img.rect.height - 40.0).abs() < 1.0, "altura da caixa: {:?}", img.rect);
-        assert_eq!(img.rgba.len(), 4 * 2 * 4, "RGBA8 de 4x2");
+        assert_eq!((img.width_px, img.height_px), (4, 2), "bitmap size");
+        assert!((img.rect.width - 80.0).abs() < 1.0, "box width: {:?}", img.rect);
+        assert!((img.rect.height - 40.0).abs() < 1.0, "box height: {:?}", img.rect);
+        assert_eq!(img.rgba.len(), 4 * 2 * 4, "RGBA8 of 4x2");
     }
 
     #[test]
-    fn imagem_sem_dimensao_explicita_usa_o_tamanho_intrinseco() {
+    fn an_image_without_explicit_size_uses_its_intrinsic_size() {
         let html = format!(r#"<img src="data:image/png;base64,{PNG_4X2}" />"#);
         let dl = render_html(&html, 500.0);
         let img = &dl.images[0];
-        assert!((img.rect.width - 4.0).abs() < 1.0, "largura intrínseca: {:?}", img.rect);
-        assert!((img.rect.height - 2.0).abs() < 1.0, "altura intrínseca: {:?}", img.rect);
+        assert!((img.rect.width - 4.0).abs() < 1.0, "intrinsic width: {:?}", img.rect);
+        assert!((img.rect.height - 2.0).abs() < 1.0, "intrinsic height: {:?}", img.rect);
+    }
+
+    const SVG_20X10: &str = r##"<svg width="20" height="10" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="10" fill="#0000ff"/></svg>"##;
+
+    #[test]
+    fn svg_in_an_img_data_uri_becomes_a_display_list_item() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(SVG_20X10);
+        let html = format!(r#"<img style="width:40px;height:20px" src="data:image/svg+xml;base64,{b64}" />"#);
+        let dl = render_html(&html, 500.0);
+        assert_eq!(dl.images.len(), 1, "the SVG did not reach the display list");
+        let img = &dl.images[0];
+        assert!((img.rect.width - 40.0).abs() < 1.0, "box: {:?}", img.rect);
+        // Rasterized at 3x the box, not at the viewBox intrinsic size.
+        assert_eq!((img.width_px, img.height_px), (120, 60));
+        assert_eq!(img.rgba.len(), 120 * 60 * 4);
     }
 
     #[test]
-    fn imagem_http_e_ignorada_sem_abrir_socket() {
-        // Invariante de segurança: só data: é resolvido.
+    fn svg_without_a_size_uses_its_intrinsic_size() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(SVG_20X10);
+        let html = format!(r#"<img src="data:image/svg+xml;base64,{b64}" />"#);
+        let dl = render_html(&html, 500.0);
+        let img = &dl.images[0];
+        assert!((img.rect.width - 20.0).abs() < 1.0, "intrinsic width: {:?}", img.rect);
+        assert!((img.rect.height - 10.0).abs() < 1.0, "intrinsic height: {:?}", img.rect);
+    }
+
+    #[test]
+    fn inline_svg_becomes_an_image_with_its_intrinsic_size() {
+        let dl = render_html(&format!("<body style=\"margin:0\">{SVG_20X10}</body>"), 500.0);
+        assert_eq!(dl.images.len(), 1, "the inline <svg> did not become an image");
+        let img = &dl.images[0];
+        assert!((img.rect.width - 20.0).abs() < 1.0, "box: {:?}", img.rect);
+        assert!((img.rect.height - 10.0).abs() < 1.0, "box: {:?}", img.rect);
+    }
+
+    #[test]
+    fn inline_svg_honours_the_css_on_its_tag() {
+        let styled = SVG_20X10.replace("<svg ", r#"<svg style="width:100px;height:50px" "#);
+        let dl = render_html(&format!("<body style=\"margin:0\">{styled}</body>"), 500.0);
+        let img = &dl.images[0];
+        assert!((img.rect.width - 100.0).abs() < 1.0, "box: {:?}", img.rect);
+        assert!((img.rect.height - 50.0).abs() < 1.0, "box: {:?}", img.rect);
+    }
+
+    // Security invariant: only data: is resolved.
+
+    #[test]
+    fn an_http_image_is_ignored_without_opening_a_socket() {
         let dl = render_html(r#"<img src="https://exemplo.invalido/logo.png" />"#, 500.0);
-        assert!(dl.images.is_empty(), "esquema não-data: não pode virar imagem");
+        assert!(dl.images.is_empty(), "a non-data: scheme must not become an image");
+    }
+
+    #[test]
+    fn an_http_svg_is_ignored_without_opening_a_socket() {
+        let dl = render_html(r#"<img src="https://exemplo.invalido/logo.svg" />"#, 500.0);
+        assert!(dl.images.is_empty(), "a non-data: scheme must not become an image");
     }
 }

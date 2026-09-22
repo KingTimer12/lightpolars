@@ -1,5 +1,9 @@
+pub mod background;
 pub mod extract;
+pub mod fonts;
 pub mod net;
 pub mod resource;
+pub mod style;
+pub mod svg;
 
 pub use extract::render_html;
