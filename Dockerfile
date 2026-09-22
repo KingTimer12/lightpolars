@@ -2,7 +2,7 @@ FROM lukemathwalker/cargo-chef:latest-rust-1.98.0-alpine AS chef
 ARG APP_NAME=lightpolars
 WORKDIR /build
 RUN apk add --no-cache python3 llvm
-ENV RUSTFLAGS="-C target-cpu=native"
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./

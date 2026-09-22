@@ -34,11 +34,10 @@ RUN set -eux; \
     fi
 RUN cargo install cargo-pgo cargo-chef
 
-# NOTE: -C target-cpu=native bakes in the *builder's* ISA. Fine when the image
-# is built on the same machine family that runs it; it is a SIGILL waiting to
-# happen otherwise. Pin an explicit baseline (e.g. x86-64-v3) for portable
-# images.
-ENV RUSTFLAGS="-C target-cpu=native"
+# NOTE: x86-64-v3 is a portable baseline (AVX2/BMI2, Haswell+). Use
+# target-cpu=native only when the image is built on the same machine family
+# that runs it, otherwise it is a SIGILL waiting to happen.
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
