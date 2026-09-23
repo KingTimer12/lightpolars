@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -33,7 +34,15 @@ fn debugging() -> bool {
     std::env::var("CDP_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-async fn serve(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    // Health check na mesma porta do CDP. O pedido é espiado, não lido, para
+    // que uma conexão WebSocket chegue intacta ao handshake.
+    let mut head = [0u8; 16];
+    let n = stream.peek(&mut head).await?;
+    if is_health_request(&head[..n]) {
+        return answer_health(&mut stream).await;
+    }
+
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut sink, mut source) = ws.split();
     let mut session = Session::new();
@@ -55,4 +64,56 @@ async fn serve(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// `GET /health` ou `HEAD /health`, com ou sem query string.
+fn is_health_request(head: &[u8]) -> bool {
+    let path = head
+        .strip_prefix(b"GET ")
+        .or_else(|| head.strip_prefix(b"HEAD "));
+    path.and_then(|p| p.strip_prefix(b"/health"))
+        .is_some_and(|rest| matches!(rest.first(), Some(b' ' | b'?')))
+}
+
+async fn answer_health(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    // Consome o cabeçalho inteiro antes de responder: fechar o socket com bytes
+    // ainda não lidos faz o kernel mandar RST, e o cliente pode perder a resposta.
+    let mut request = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 8192 {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..n]);
+    }
+
+    let body = if request.starts_with(b"HEAD ") { "" } else { "ok" };
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{body}"
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_health_request;
+
+    #[test]
+    fn recognizes_health_requests() {
+        assert!(is_health_request(b"GET /health HTTP/1.1"));
+        assert!(is_health_request(b"HEAD /health HTTP/1"));
+        assert!(is_health_request(b"GET /health?x=1 HT"));
+    }
+
+    #[test]
+    fn leaves_everything_else_to_the_websocket() {
+        assert!(!is_health_request(b"GET / HTTP/1.1\r\n"));
+        assert!(!is_health_request(b"GET /healthz HTTP/"));
+        assert!(!is_health_request(b"POST /health HTTP"));
+        assert!(!is_health_request(b"GET /heal"));
+        assert!(!is_health_request(b""));
+    }
 }

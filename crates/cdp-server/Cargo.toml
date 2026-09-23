@@ -12,7 +12,7 @@ raster-out.workspace = true
 base64 = "0.22"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 # Alocador global do binário. Layout e rasterização são cargas de muitas

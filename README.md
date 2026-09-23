@@ -67,6 +67,12 @@ const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: {...} 
 const png = await page.screenshot({ fullPage: true })
 ```
 
+Health check na mesma porta, em HTTP puro:
+
+```bash
+curl http://127.0.0.1:9222/health   # 200 "ok"
+```
+
 ## Invariante de segurança
 
 `render-core` resolve **exclusivamente** `data:` URI. Qualquer outro esquema
