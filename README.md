@@ -71,7 +71,11 @@ Health check na mesma porta, em HTTP puro:
 
 ```bash
 curl http://127.0.0.1:9222/health   # 200 "ok"
+cdp-server --health                 # o mesmo check, sem curl: sai 0 ou 1
 ```
+
+A imagem Docker já declara `HEALTHCHECK` com `cdp-server --health`, porque a
+distroless não tem curl nem shell.
 
 ## Invariante de segurança
 

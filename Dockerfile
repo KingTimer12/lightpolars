@@ -86,4 +86,6 @@ ENV MIMALLOC_PURGE_DELAY=0 \
     MALLOC_TRIM_THRESHOLD_=131072
 
 COPY --from=build /build/target/release/cdp-server ./
+# Sem curl na distroless: o próprio binário chama o /health.
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD [ "/cdp-server", "--health" ]
 CMD [ "./cdp-server" ]

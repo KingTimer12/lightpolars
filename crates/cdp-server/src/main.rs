@@ -15,6 +15,19 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = std::env::var("CDP_ADDR").unwrap_or_else(|_| "127.0.0.1:9222".to_string());
+
+    // `cdp-server --health`: o HEALTHCHECK de dentro do container. A imagem é
+    // distroless, sem curl nem shell, então o próprio binário faz a checagem.
+    if std::env::args().nth(1).as_deref() == Some("--health") {
+        std::process::exit(match check_health(&address) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("unhealthy: {e}");
+                1
+            }
+        });
+    }
+
     let listener = TcpListener::bind(&address).await?;
     println!("CDP listening on ws://{address}");
 
@@ -88,7 +101,11 @@ async fn answer_health(stream: &mut TcpStream) -> Result<(), Box<dyn std::error:
         request.extend_from_slice(&chunk[..n]);
     }
 
-    let body = if request.starts_with(b"HEAD ") { "" } else { "ok" };
+    let body = if request.starts_with(b"HEAD ") {
+        ""
+    } else {
+        "ok"
+    };
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{body}"
     );
@@ -97,9 +114,64 @@ async fn answer_health(stream: &mut TcpStream) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+/// Chama o `/health` do servidor que escuta em `address`. Um servidor em
+/// `0.0.0.0`/`[::]` é alcançado pelo loopback da mesma família.
+fn check_health(address: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, ToSocketAddrs};
+    use std::time::Duration;
+
+    let target = match address.parse::<SocketAddr>() {
+        Ok(addr) => loopback_if_unspecified(addr),
+        Err(_) => address
+            .to_socket_addrs()?
+            .next()
+            .ok_or("CDP_ADDR sem endereço")?,
+    };
+    let timeout = Duration::from_secs(2);
+    let mut stream = std::net::TcpStream::connect_timeout(&target, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    if response.starts_with(b"HTTP/1.1 200 ") {
+        Ok(())
+    } else {
+        Err(format!(
+            "resposta inesperada: {}",
+            String::from_utf8_lossy(&response)
+        )
+        .into())
+    }
+}
+
+fn loopback_if_unspecified(mut addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    if addr.ip().is_unspecified() {
+        addr.set_ip(if addr.is_ipv4() {
+            Ipv4Addr::LOCALHOST.into()
+        } else {
+            Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    addr
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_health_request;
+    use super::{is_health_request, loopback_if_unspecified};
+
+    #[test]
+    fn health_check_reaches_an_unspecified_bind_through_loopback() {
+        let v4 = loopback_if_unspecified("0.0.0.0:9222".parse().unwrap());
+        assert_eq!(v4, "127.0.0.1:9222".parse().unwrap());
+        let v6 = loopback_if_unspecified("[::]:9333".parse().unwrap());
+        assert_eq!(v6, "[::1]:9333".parse().unwrap());
+        let fixed = loopback_if_unspecified("10.0.0.5:9222".parse().unwrap());
+        assert_eq!(fixed, "10.0.0.5:9222".parse().unwrap());
+    }
 
     #[test]
     fn recognizes_health_requests() {
