@@ -1,7 +1,12 @@
-FROM lukemathwalker/cargo-chef:latest-rust-1.98.0-alpine AS chef
+# Build em glibc, não musl: o fontique abre a libfontconfig com dlopen, e um
+# binário musl estático não consegue fazer dlopen. Construído na alpine, o
+# servidor sobe sem fonte de sistema nenhuma, mesmo com fontes instaladas.
+FROM lukemathwalker/cargo-chef:latest-rust-1.98.0 AS chef
 ARG APP_NAME=lightpolars
 WORKDIR /build
-RUN apk add --no-cache python3
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 \
+ && rm -rf /var/lib/apt/lists/*
 
 # A linha de base da ISA depende da arquitetura, então não pode ser um ENV fixo.
 # Em x86-64, v3 (AVX2/BMI2, Haswell em diante) é o piso portável; em aarch64 não
@@ -35,7 +40,19 @@ COPY crates ./crates
 
 RUN RUSTFLAGS="$(cat /rustflags)" cargo build --release --bin cdp-server
 
-FROM gcr.io/distroless/cc-debian13 AS runtime
+# O runtime precisa de fontes do sistema. O fontique (via parley/blitz) acha as
+# fontes no Linux abrindo a libfontconfig com dlopen; sem ela, ou sem fonte
+# nenhuma instalada, todo texto que não vem de um @font-face embutido some do
+# PDF. A distroless não tem nem uma nem outra, por isso a base é a debian slim.
+#
+# fonts-liberation: métricas iguais às de Arial, Times New Roman e Courier New,
+# e o fontconfig já mapeia esses nomes para ela.
+# fonts-dejavu-core: cobertura ampla de Unicode, inclusive símbolos como ⚠.
+FROM debian:trixie-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fontconfig fonts-liberation fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/* \
+ && fc-cache -f
 
 COPY --from=build /build/target/release/cdp-server ./
 CMD [ "./cdp-server" ]
