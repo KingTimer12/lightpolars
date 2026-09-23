@@ -43,16 +43,36 @@ RUN RUSTFLAGS="$(cat /rustflags)" cargo build --release --bin cdp-server
 # O runtime precisa de fontes do sistema. O fontique (via parley/blitz) acha as
 # fontes no Linux abrindo a libfontconfig com dlopen; sem ela, ou sem fonte
 # nenhuma instalada, todo texto que não vem de um @font-face embutido some do
-# PDF. A distroless não tem nem uma nem outra, por isso a base é a debian slim.
+# PDF. A distroless não tem nem uma nem outra, então elas são montadas aqui e
+# copiadas para lá: a base debian inteira custaria ~110 MB só por isso.
 #
-# fonts-liberation: métricas iguais às de Arial, Times New Roman e Courier New,
-# e o fontconfig já mapeia esses nomes para ela.
-# fonts-dejavu-core: cobertura ampla de Unicode, inclusive símbolos como ⚠.
-FROM debian:trixie-slim AS runtime
+# fonts-dejavu-core: cobertura ampla de Unicode, inclusive símbolos como ⚠. É o
+# que atende `sans-serif`, `serif` e também `Arial`: o fontique não segue os
+# aliases do fontconfig, então uma fonte métrica-compatível (Liberation) não
+# seria escolhida no lugar de Arial de qualquer jeito.
+FROM debian:trixie-slim AS fonts
 RUN apt-get update \
- && apt-get install -y --no-install-recommends fontconfig fonts-liberation fonts-dejavu-core \
+ && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/* \
  && fc-cache -f
+# A libfontconfig e as dependências dela, exceto o que a distroless cc já traz
+# (glibc e libgcc). O `cp -L` grava cada uma pelo soname, que é o nome que o
+# dlopen e o loader procuram.
+RUN mkdir -p /out/lib \
+ && lib="$(ls /usr/lib/*-linux-gnu/libfontconfig.so.1)" \
+ && { echo "$lib"; ldd "$lib" | awk '/=> \//{print $3}'; } \
+    | grep -vE '/(libc|libm|ld-linux[^/]*|libgcc_s)\.so' \
+    | xargs -I{} cp -L {} /out/lib/
+
+FROM gcr.io/distroless/cc-debian13 AS runtime
+# /usr/lib está no caminho padrão do loader em qualquer arquitetura, então não
+# é preciso saber o triplet aqui.
+COPY --from=fonts /out/lib/ /usr/lib/
+COPY --from=fonts /etc/fonts /etc/fonts
+COPY --from=fonts /usr/share/fontconfig /usr/share/fontconfig
+COPY --from=fonts /usr/share/xml/fontconfig /usr/share/xml/fontconfig
+COPY --from=fonts /usr/share/fonts /usr/share/fonts
+COPY --from=fonts /var/cache/fontconfig /var/cache/fontconfig
 
 # Sem isto a memória fica presa no maior pico de concorrência já atendido. O
 # mimalloc só devolve páginas livres ao SO depois de um atraso, e a checagem
