@@ -54,5 +54,16 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && fc-cache -f
 
+# Sem isto a memória fica presa no maior pico de concorrência já atendido. O
+# mimalloc só devolve páginas livres ao SO depois de um atraso, e a checagem
+# roda na thread dona quando ela volta a alocar; worker do tokio ocioso nunca
+# volta, então o que ele liberou fica com o processo. Com 6 sessões paralelas,
+# o heap parava em ~150 MB depois do pico; com PURGE_DELAY=0, ~55 MB, sem
+# diferença mensurável de tempo. As duas MALLOC_* valem para o que ainda passa
+# pelo malloc do glibc (fontconfig, freetype): menos arenas e trim mais cedo.
+ENV MIMALLOC_PURGE_DELAY=0 \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=131072
+
 COPY --from=build /build/target/release/cdp-server ./
 CMD [ "./cdp-server" ]
