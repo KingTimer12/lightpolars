@@ -33,7 +33,10 @@ opt-level = 3
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# unwind, não abort: um panic dentro do layout de um documento tem que matar só
+# a sessão dele (o tokio captura o panic da task), não o servidor inteiro com
+# todas as conexões abertas.
+panic = "unwind"
 strip = "symbols"
 
 # Release with symbols: dhat can only attribute an allocation if it can resolve

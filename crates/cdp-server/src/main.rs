@@ -12,8 +12,23 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Pilha de cada worker do tokio. O layout (stylo, taffy, a extração) desce a
+/// árvore recursivamente, e com os 2 MiB padrão ~1000 elementos aninhados já
+/// estouravam a pilha. Estouro de pilha não é panic: aborta o processo inteiro
+/// e derruba todas as sessões abertas, não só a do documento culpado. HTML com
+/// tag sem fechar dentro de um loop chega nessa profundidade fácil. A memória é
+/// só reservada; o SO entrega as páginas conforme a pilha é de fato usada.
+const WORKER_STACK: usize = 256 * 1024 * 1024;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(WORKER_STACK)
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let address = std::env::var("CDP_ADDR").unwrap_or_else(|_| "127.0.0.1:9222".to_string());
 
     // `cdp-server --health`: o HEALTHCHECK de dentro do container. A imagem é
