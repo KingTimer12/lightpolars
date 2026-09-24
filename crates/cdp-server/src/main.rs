@@ -1,6 +1,10 @@
 //! CDP server. Runs no JavaScript and touches no network: every resource in
 //! the HTML must be a data: URI.
 
+mod lifecycle;
+
+use std::sync::atomic::Ordering;
+
 use cdp_server::session::{Output, Session};
 use futures_util::{SinkExt, StreamExt};
 
@@ -10,6 +14,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Pilha de cada worker do tokio. O layout (stylo, taffy, a extração) desce a
@@ -43,16 +48,35 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    lifecycle::start(&address);
     let listener = TcpListener::bind(&address).await?;
     println!("CDP listening on ws://{address}");
 
-    while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(async move {
-            if let Err(e) = serve(stream).await {
-                eprintln!("session ended: {e}");
+    // Como PID 1 no container, o processo não tem ação padrão para SIGTERM:
+    // sem tratar o sinal, `docker stop` esperava os 10 s do prazo e mandava
+    // SIGKILL. Tratado, a parada é imediata e fica registrada.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
+    let reason = loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { break "accept falhou" };
+                tokio::spawn(async move {
+                    lifecycle::OPEN_SESSIONS.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = serve(stream).await {
+                        eprintln!("session ended: {e}");
+                    }
+                    lifecycle::OPEN_SESSIONS.fetch_sub(1, Ordering::Relaxed);
+                });
             }
-        });
-    }
+            _ = sigterm.recv() => break "SIGTERM",
+            _ = sigint.recv() => break "SIGINT",
+        }
+    };
+
+    lifecycle::stop(reason);
+    println!("CDP stopping: {reason}");
     Ok(())
 }
 

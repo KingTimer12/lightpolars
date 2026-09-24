@@ -55,6 +55,7 @@ para nomear tipos — mantém a fronteira entre layout e paginação.
 cargo run -p cdp-server                      # escuta em ws://127.0.0.1:9222
 CDP_ADDR=127.0.0.1:9333 cargo run -p cdp-server   # outra porta
 CDP_DEBUG=1 cargo run -p cdp-server           # espelha o tráfego CDP no stderr
+CDP_LOG_FILE=eventos.log cargo run -p cdp-server  # START/STOP/PANIC/UNCLEAN num arquivo
 ```
 
 Aponte o Puppeteer existente para o endpoint:

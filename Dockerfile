@@ -85,6 +85,11 @@ ENV MIMALLOC_PURGE_DELAY=0 \
     MALLOC_ARENA_MAX=2 \
     MALLOC_TRIM_THRESHOLD_=131072
 
+# Eventos do ciclo de vida (START, STOP com o sinal, PANIC e UNCLEAN quando a
+# execução anterior morreu sem parar limpo). Monte /var/log/lightpolars num
+# volume para o histórico sobreviver à recriação do container.
+ENV CDP_LOG_FILE=/var/log/lightpolars/eventos.log
+
 COPY --from=build /build/target/release/cdp-server ./
 # Sem curl na distroless: o próprio binário chama o /health.
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD [ "/cdp-server", "--health" ]
