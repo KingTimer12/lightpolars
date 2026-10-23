@@ -63,6 +63,10 @@ RUN mkdir -p /out/lib \
  && { echo "$lib"; ldd "$lib" | awk '/=> \//{print $3}'; } \
     | grep -vE '/(libc|libm|ld-linux[^/]*|libgcc_s)\.so' \
     | xargs -I{} cp -L {} /out/lib/
+# Diretório do log de ciclo de vida. Criado aqui porque a distroless não tem
+# shell, e o /var/log dela é do root: rodando como nonroot, o create_dir_all do
+# servidor falharia calado e o log nunca seria escrito.
+RUN mkdir -p /out/log/lightpolars
 
 FROM gcr.io/distroless/cc-debian13 AS runtime
 # /usr/lib está no caminho padrão do loader em qualquer arquitetura, então não
@@ -89,8 +93,19 @@ ENV MIMALLOC_PURGE_DELAY=0 \
 # execução anterior morreu sem parar limpo). Monte /var/log/lightpolars num
 # volume para o histórico sobreviver à recriação do container.
 ENV CDP_LOG_FILE=/var/log/lightpolars/eventos.log
+# Um volume nomeado vazio herda este dono na primeira montagem; num bind mount
+# o diretório do host precisa ser dado ao 65532 (`chown 65532:65532`).
+COPY --from=fonts --chown=65532:65532 /out/log/lightpolars /var/log/lightpolars
 
 COPY --from=build /build/target/release/cdp-server ./
+
+# O CDP não tem autenticação: quem alcança a porta comanda o servidor. Rodar
+# como o nonroot da distroless (65532) limita o estrago de uma falha no parser
+# de HTML a um usuário sem dono de nada no container. A porta 9222 não é
+# privilegiada, então não precisa de capability nenhuma. Pelo mesmo motivo, a
+# porta não deve ser publicada no host: quem consome fala pela rede interna.
+USER 65532:65532
+
 # Sem curl na distroless: o próprio binário chama o /health.
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD [ "/cdp-server", "--health" ]
 CMD [ "./cdp-server" ]
